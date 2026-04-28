@@ -1,0 +1,29 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+build/
+dist*/
+outputs/**
+!outputs/.gitkeep
+!outputs/**/.gitkeep
+
+data/.yfinance_tz_cache/
+data/.yfinance_cache/
+
+# Data directory cleanup: ignore all sqlite and large csv files
+data/krx_market_caps.csv
+data/krx_shared_db/
+data/**/*.sqlite*
+data/**/*.db
+data/**/*.csv
+
+# Keep essential config files if any (example)
+!data/sp500_components_full.csv
+
+data/test_tmp_*/
+data/tmp*/
+**/test_tmp_*/
+**/tmp*/
+tmpgzeyvcrs/
