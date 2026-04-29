@@ -25,6 +25,9 @@ from uuid import uuid4
 import numpy as np
 import pandas as pd
 
+import pipeline_stock.web_gui as stock_web_gui
+import pipeline_stock_news.web_gui as news_web_gui
+
 from .analysis import (
     DEFAULT_CASH_BUFFER_PCT,
     DEFAULT_LOOKBACK_DAYS,
@@ -40,6 +43,9 @@ from .analysis import (
     build_portfolio_dashboard,
     build_portfolio_optimization,
     delete_trade,
+    DEFAULT_LOOKBACK_DAYS as PORTFOLIO_DEFAULT_LOOKBACK_DAYS,
+    DEFAULT_OPTIMIZATION_UNIVERSE_SIZE as PORTFOLIO_DEFAULT_OPTIMIZATION_UNIVERSE_SIZE,
+    DEFAULT_VIRTUAL_FORECAST_HORIZON_DAYS as PORTFOLIO_DEFAULT_VIRTUAL_FORECAST_HORIZON_DAYS,
 )
 
 
@@ -52,6 +58,13 @@ class _PageContext:
     message: str | None = None
     error: str | None = None
     virtual_result: VirtualTradeResult | None = None
+    stock_forecast_ctx: stock_web_gui._RunContext | None = None
+    stock_financials_ctx: stock_web_gui._FinancialContext | None = None
+    stock_technical_ctx: stock_web_gui.ta_web_gui._RunContext | None = None
+    stock_wfv_ctx: stock_web_gui._WalkForwardContext | None = None
+    news_overview_ctx: news_web_gui.StockNewsDashboard | None = None
+    news_event_ctx: news_web_gui.StockNewsDashboard | None = None
+    news_topics_ctx: news_web_gui.StockNewsDashboard | None = None
     optimization: OptimizationResult | None = None
     optimization_params: dict[str, float | int] | None = None
 
@@ -75,6 +88,10 @@ def _nav(active: str, ctx: _PageContext) -> str:
         ("scoring", "/scoring", "통합 스코어"),
         ("virtual-trade", "/virtual-trade", "가상 거래"),
         ("optimization", "/optimization", "최적화"),
+        ("stock-forecast", "/stock-forecast", "주가 예측"),
+        ("stock-financials", "/stock-financials", "재무/밸류"),
+        ("stock-technical", "/stock-technical", "기술적 분석"),
+        ("stock-wfv", "/stock-wfv", "워크포워드"),
         ("refresh", "/refresh", "데이터 갱신"),
     ]
     links = []
@@ -96,6 +113,7 @@ def _base_css() -> str:
       --muted: #5f6b7a;
       --brand: #111111;
       --accent: #0f4c81;
+      --accent-light: #eef4fb;
       --ok-bg: #e8f7ee;
       --ok-line: #99d5af;
       --err-bg: #fff2f2;
@@ -110,6 +128,7 @@ def _base_css() -> str:
     .sub { color: var(--muted); margin-bottom: 14px; line-height: 1.5; }
     .nav { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
     .nav a { text-decoration: none; color: #111; border: 1px solid #111; background: #fff; border-radius: 999px; padding: 7px 12px; font-size: 13px; }
+    .nav a:hover { background: #eee; }
     .nav a.active { background: #111; color: #fff; border-color: #111; }
     .card { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 14px; }
     .stack { display: grid; gap: 12px; }
@@ -129,6 +148,7 @@ def _base_css() -> str:
     .toolbar { display: flex; gap: 10px; align-items: end; flex-wrap: wrap; margin-top: 10px; }
     button { background: #111; border: 0; color: #fff; padding: 10px 16px; border-radius: 8px; cursor: pointer; font-weight: 600; }
     .notice { margin-top: 10px; border-radius: 8px; padding: 10px; }
+    .notice a { color: var(--accent); text-decoration: underline; }
     .notice.ok { background: var(--ok-bg); border: 1px solid var(--ok-line); }
     .notice.err { background: var(--err-bg); border: 1px solid var(--err-line); }
     .table-wrap { width: 100%; overflow-x: auto; }
@@ -137,7 +157,7 @@ def _base_css() -> str:
     .small { font-size: 12px; color: var(--muted); }
     .split-grid { margin-top: 12px; display: grid; grid-template-columns: repeat(2, minmax(360px, 1fr)); gap: 10px; }
     .pane { background: #fff; border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
-    .pane h3 { margin: 0 0 8px 0; }
+    .pane h3 { margin: 0 0 8px 0; font-size: 14px; }
     .line-list { height: 480px; overflow: auto; border: 1px solid var(--line); border-radius: 8px; background: #fff; padding: 8px; }
     .line { font-family: Consolas, "Courier New", monospace; font-size: 12px; line-height: 1.45; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; border-bottom: 1px solid #eef2f7; padding: 3px 2px; }
     .line:last-child { border-bottom: 0; }
@@ -145,7 +165,7 @@ def _base_css() -> str:
     .muted { color: var(--muted); }
     .db-note { font-size: 12px; color: var(--muted); margin-top: 6px; }
     .refresh-card { border-left: 5px solid var(--accent); }
-    .latest-inline {
+    .refresh-latest-inline {
       min-width: 280px; padding: 8px 10px; border-radius: 8px;
       background: #eef4fb; border: 1px solid #c7d9ee; color: #24425f; font-size: 12px; line-height: 1.45;
     }
@@ -172,7 +192,7 @@ def _base_css() -> str:
       gap: 10px;
       align-items: center;
       margin-top: 0;
-      padding: 10px 12px;
+      padding: 8px 12px;
       border: 1px solid #d7e2ec;
       border-radius: 10px;
       background: #f9fbfd;
@@ -198,7 +218,7 @@ def _base_css() -> str:
       gap: 14px;
       align-items: start;
     }
-    .refresh-hero h2 { margin: 0 0 8px 0; }
+    .refresh-hero h2 { margin: 0 0 8px 0; font-size: 22px; }
     .refresh-summary {
       border: 1px solid var(--line);
       border-radius: 10px;
@@ -249,6 +269,10 @@ def _base_css() -> str:
       text-transform: uppercase;
       letter-spacing: 0.03em;
     }
+    .chart-card {
+      border: 1px solid var(--line); border-radius: 8px; padding: 14px;
+      letter-spacing: 0.03em;
+    }
     .refresh-log-list { height: 360px; }
     .refresh-update-list { height: 360px; }
     @media (max-width: 1100px) {
@@ -265,7 +289,6 @@ def _base_css() -> str:
     }
     """
 
-
 def _page_head(title: str) -> str:
     return (
         '<div class="page-head">'
@@ -273,48 +296,6 @@ def _page_head(title: str) -> str:
         '<div class="page-credit">Keumj 제작</div>'
         "</div>"
     )
-
-def _ensure_stock_lab_running(port: int = 8512) -> None:
-    """Stock Analysis Lab 서버가 실행 중인지 확인하고, 아니면 자동으로 실행합니다."""
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.settimeout(0.2)
-            if s.connect_ex(("localhost", port)) == 0:
-                return # 이미 실행 중
-        
-        # 실행 중이 아니면 백그라운드에서 프로세스 실행
-        root = _project_root_dir()
-        if getattr(sys, "frozen", False):
-            cmd = [sys.executable, "backend", "stock", "--port", str(port), "--host", "localhost"]
-        else:
-            cmd = [sys.executable, "-m", "pipeline_stock.cli", "--web-gui", "--port", str(port), "--host", "localhost"]
-        subprocess.Popen(cmd, cwd=str(root), creationflags=subprocess.CREATE_NEW_CONSOLE if os.name == 'nt' else 0)
-    except Exception:
-        pass
-
-
-def _dispatch_stock_lab_external_select(ticker: str, *, target: str = "/page6", port: int = 8512) -> tuple[bool, str]:
-    clean_ticker = str(ticker or "").strip().upper()
-    if not clean_ticker:
-        return False, "ticker is required"
-
-    _ensure_stock_lab_running(port)
-    request_url = (
-        f"http://localhost:{int(port)}/external_select"
-        f"?ticker={quote(clean_ticker)}&target={quote(target)}"
-    )
-    try:
-        with urlopen(request_url, timeout=1.8) as response:
-            payload = json.loads(response.read().decode("utf-8", errors="replace"))
-    except URLError as exc:
-        return False, f"stock lab sync failed: {exc}"
-    except Exception as exc:
-        return False, f"stock lab sync failed: {type(exc).__name__}: {exc}"
-
-    if bool(payload.get("ok")):
-        return True, "stock lab ticker synced"
-    return False, str(payload.get("error") or "stock lab sync failed")
-
 
 def _safe_table(frame: pd.DataFrame, *, max_rows: int = 200, escape: bool = True) -> str:
     if frame is None or frame.empty:
@@ -390,6 +371,7 @@ def _summary_metrics(dashboard: PortfolioDashboard | None) -> str:
         ("MTD", _fmt(row.get("portfolio_return_mtd_pct"), suffix="%")),
         ("YTD", _fmt(row.get("portfolio_return_ytd_pct"), suffix="%")),
         ("20일 수익률", _fmt(row.get("portfolio_return_20d_pct"), suffix="%")),
+        ("60일 수익률", _fmt(row.get("portfolio_return_60d_pct"), suffix="%")),
         ("연율화 변동성", _fmt(row.get("portfolio_vol_annual_pct"), suffix="%")),
         ("SP500 베타", _fmt(row.get("benchmark_beta"), 3)),
     ]
@@ -408,6 +390,10 @@ def _date_range_form(active: str, ctx: _PageContext) -> str:
         "scoring": "/scoring",
         "virtual-trade": "/virtual-trade",
         "optimization": "/optimization",
+        "stock-forecast": "/stock-forecast",
+        "stock-financials": "/stock-financials",
+        "stock-technical": "/stock-technical",
+        "stock-wfv": "/stock-wfv",
     }
     action = action_map.get(active, "/overview")
     run_notice = ""
@@ -483,7 +469,7 @@ def _data_entry_page(ctx: _PageContext) -> str:
     {_message_block(ctx)}
     {_date_range_form("data-entry", ctx)}
     <div class="card" style="margin-bottom: 12px; border-left: 5px solid var(--accent);">
-      <h2>현금 입출금 관리</h2>
+      <h2 style="margin-top:0;">현금 입출금 관리</h2>
       <form method="post" action="/run_add_trade">
         <input type="hidden" name="lookback_days" value="{int(ctx.lookback_days)}">
         <input type="hidden" name="start_date" value="{html.escape(ctx.start_date)}">
@@ -512,7 +498,7 @@ def _data_entry_page(ctx: _PageContext) -> str:
       </form>
     </div>
     <div class="card">
-      <h2>거래 입력</h2>
+      <h2 style="margin-top:0;">거래 입력</h2>
       <form method="post" action="/run_add_trade">
         <input type="hidden" name="lookback_days" value="{int(ctx.lookback_days)}">
         <input type="hidden" name="start_date" value="{html.escape(ctx.start_date)}">
@@ -551,28 +537,36 @@ def _data_entry_page(ctx: _PageContext) -> str:
 
 def _overview_page(ctx: _PageContext) -> str:
     dashboard = ctx.dashboard
+    # 중첩 f-string을 피하기 위해 차트 HTML을 미리 생성
+    chart1_html = "<p class='hint'>포트폴리오 배분 차트를 불러올 수 없습니다.</p>"
+    if dashboard and dashboard.sector_allocation_chart:
+        chart1_html = f'<img src="data:image/png;base64,{dashboard.sector_allocation_chart}" class="chart-img" style="max-width:600px; margin: 0 auto; display:block;" alt="Portfolio Sector Allocation" />'
+
+    chart2_html = "<p class='hint'>벤치마크 배분 차트를 불러올 수 없습니다.</p>"
+    if dashboard and dashboard.benchmark_sector_allocation_chart:
+        chart2_html = f'<img src="data:image/png;base64,{dashboard.benchmark_sector_allocation_chart}" class="chart-img" style="max-width:600px; margin: 0 auto; display:block;" />'
+
     body = f"""
     {_message_block(ctx)}
     {_date_range_form("overview", ctx)}
     {_summary_metrics(dashboard)}
     <div class="card" style="margin-top: 12px;">
-      <h3>섹터 배분 비교 (Portfolio vs S&P500)</h3>
+      <h3 style="margin-top:0;">섹터 배분 비교 (Portfolio vs S&P500)</h3>
       <div class="grid-2">
         <div class="chart-card">
-          {f'<img src="data:image/png;base64,{dashboard.sector_allocation_chart}" class="chart-img" style="max-width:600px; margin: 0 auto; display:block;" />' if dashboard and dashboard.sector_allocation_chart else "<p class='hint'>포트폴리오 배분 차트를 불러올 수 없습니다.</p>"}
+          {chart1_html}
         </div>
         <div class="chart-card">
-          {f'<img src="data:image/png;base64,{dashboard.benchmark_sector_allocation_chart}" class="chart-img" style="max-width:600px; margin: 0 auto; display:block;" />' if dashboard and dashboard.benchmark_sector_allocation_chart else "<p class='hint'>벤치마크 배분 차트를 불러올 수 없습니다.</p>"}
         </div>
       </div>
     </div>
     <div class="grid-2">
       <div class="card">
-        <h3>보유 종목 퍼포먼스</h3>
+        <h3 style="margin-top:0;">보유 종목 퍼포먼스</h3>
         {_safe_table(dashboard.holdings_performance if dashboard else pd.DataFrame())}
       </div>
       <div class="card">
-        <h3>현재 포지션</h3>
+        <h3 style="margin-top:0;">현재 포지션</h3>
         {_safe_table(dashboard.positions if dashboard else pd.DataFrame())}
       </div>
     </div>
@@ -586,21 +580,33 @@ def _overview_page(ctx: _PageContext) -> str:
 
 def _attribution_page(ctx: _PageContext) -> str:
     dashboard = ctx.dashboard
+    chart_cum_html = "<p class='hint'>차트 데이터를 불러올 수 없습니다.</p>"
+    if dashboard and dashboard.cumulative_chart:
+        chart_cum_html = f'<img src="data:image/png;base64,{dashboard.cumulative_chart}" class="chart-img" alt="Cumulative Return Chart" />'
+
+    chart_sec_html = "<p class='hint'>차트 데이터를 불러올 수 없습니다.</p>"
+    if dashboard and dashboard.sector_contribution_chart:
+        chart_sec_html = f'<img src="data:image/png;base64,{dashboard.sector_contribution_chart}" class="chart-img" alt="Sector Contribution Chart" />'
+
+    chart_style_html = "<p class='hint'>차트 데이터를 불러올 수 없습니다.</p>"
+    if dashboard and dashboard.style_exposure_chart:
+        chart_style_html = f'<img src="data:image/png;base64,{dashboard.style_exposure_chart}" class="chart-img" alt="Style Exposure Chart" />'
+
     body = f"""
     {_message_block(ctx)}
     {_date_range_form("attribution", ctx)}
     <div class="card" style="margin-bottom: 12px;">
-      <h3>누적 수익률 추이 (vs S&P500)</h3>
-      {f'<img src="data:image/png;base64,{dashboard.cumulative_chart}" class="chart-img" />' if dashboard and dashboard.cumulative_chart else "<p class='hint'>차트 데이터를 불러올 수 없습니다.</p>"}
+      <h3 style="margin-top:0;">누적 수익률 추이 (vs S&P500)</h3>
+      {f'<img src="data:image/png;base64,{dashboard.cumulative_chart}" class="chart-img" alt="Cumulative Return Chart" />' if dashboard and dashboard.cumulative_chart else "<p class='hint'>차트 데이터를 불러올 수 없습니다.</p>"}
     </div>
     <div class="grid-2" style="margin-bottom: 12px;">
        <div class="card">
-         <h3>섹터별 성과 기여도 (Attribution)</h3>
-         {f'<img src="data:image/png;base64,{dashboard.sector_contribution_chart}" class="chart-img" />' if dashboard and dashboard.sector_contribution_chart else "<p class='hint'>차트 데이터를 불러올 수 없습니다.</p>"}
+         <h3 style="margin-top:0;">섹터별 성과 기여도 (Attribution)</h3>
+         {f'<img src="data:image/png;base64,{dashboard.sector_contribution_chart}" class="chart-img" alt="Sector Contribution Chart" />' if dashboard and dashboard.sector_contribution_chart else "<p class='hint'>차트 데이터를 불러올 수 없습니다.</p>"}
        </div>
        <div class="card">
-         <h3>스타일 노출 (Style Exposure)</h3>
-         {f'<img src="data:image/png;base64,{dashboard.style_exposure_chart}" class="chart-img" />' if dashboard and dashboard.style_exposure_chart else "<p class='hint'>차트 데이터를 불러올 수 없습니다.</p>"}
+         <h3 style="margin-top:0;">스타일 노출 (Style Exposure)</h3>
+         {f'<img src="data:image/png;base64,{dashboard.style_exposure_chart}" class="chart-img" alt="Style Exposure Chart" />' if dashboard and dashboard.style_exposure_chart else "<p class='hint'>차트 데이터를 불러올 수 없습니다.</p>"}
        </div>
     </div>
     <div class="card">
@@ -609,15 +615,15 @@ def _attribution_page(ctx: _PageContext) -> str:
     </div>
     <div class="grid-2">
       <div class="card">
-        <h3>포트폴리오 절대 성과 요약</h3>
+        <h3 style="margin-top:0;">포트폴리오 절대 성과 요약</h3>
         {_safe_table(dashboard.portfolio_summary if dashboard else pd.DataFrame())}
       </div>
       <div class="card">
-        <h3>스타일 노출</h3>
+        <h3 style="margin-top:0;">스타일 노출</h3>
         {_safe_table(dashboard.style_exposure if dashboard else pd.DataFrame())}
       </div>
     </div>
-    <div class="card">
+    <div class="card" style="margin-top:12px;">
       <h3>SP500 대비 종목별 상대 기여</h3>
       {_safe_table(dashboard.stock_attribution if dashboard else pd.DataFrame())}
     </div>
@@ -637,26 +643,34 @@ def _attribution_page(ctx: _PageContext) -> str:
 
 def _risk_page(ctx: _PageContext) -> str:
     dashboard = ctx.dashboard
+    chart_risk_html = "<p class='hint'>차트 데이터를 불러올 수 없습니다.</p>"
+    if dashboard and dashboard.risk_contribution_chart:
+        chart_risk_html = f'<img src="data:image/png;base64,{dashboard.risk_contribution_chart}" class="chart-img" alt="Risk Contribution Chart" />'
+
+    chart_active_html = "<p class='hint'>차트 데이터를 불러올 수 없습니다.</p>"
+    if dashboard and dashboard.active_risk_contribution_chart:
+        chart_active_html = f'<img src="data:image/png;base64,{dashboard.active_risk_contribution_chart}" class="chart-img" alt="Active Risk Contribution Chart" />'
+
     body = f"""
     {_message_block(ctx)}
     {_date_range_form("risk", ctx)}
     <div class="grid-2">
-      <div class="card">
-        <h3>절대 리스크</h3>
+      <div class="card" style="margin-top:12px;">
+        <h3 style="margin-top:0;">절대 리스크</h3>
         {_safe_table(dashboard.risk_summary if dashboard else pd.DataFrame())}
       </div>
-      <div class="card">
-        <h3>SP500 대비 상대 리스크</h3>
+      <div class="card" style="margin-top:12px;">
+        <h3 style="margin-top:0;">SP500 대비 상대 리스크</h3>
         {_safe_table(dashboard.relative_risk_summary if dashboard else pd.DataFrame())}
       </div>
       <div class="card">
-        <h3>종목별 절대 리스크 기여 (%)</h3>
-        {f'<img src="data:image/png;base64,{dashboard.risk_contribution_chart}" class="chart-img" />' if dashboard and dashboard.risk_contribution_chart else "<p class='hint'>차트 데이터를 불러올 수 없습니다.</p>"}
+        <h3 style="margin-top:0;">종목별 절대 리스크 기여 (%)</h3>
+        {f'<img src="data:image/png;base64,{dashboard.risk_contribution_chart}" class="chart-img" alt="Risk Contribution Chart" />' if dashboard and dashboard.risk_contribution_chart else "<p class='hint'>차트 데이터를 불러올 수 없습니다.</p>"}
         <div style="margin-top:10px;">{_safe_table(dashboard.risk_contribution if dashboard else pd.DataFrame(), max_rows=10)}</div>
       </div>
       <div class="card">
-        <h3>종목별 Active Risk 기여 (%)</h3>
-        {f'<img src="data:image/png;base64,{dashboard.active_risk_contribution_chart}" class="chart-img" />' if dashboard and dashboard.active_risk_contribution_chart else "<p class='hint'>차트 데이터를 불러올 수 없습니다.</p>"}
+        <h3 style="margin-top:0;">종목별 Active Risk 기여 (%)</h3>
+        {f'<img src="data:image/png;base64,{dashboard.active_risk_contribution_chart}" class="chart-img" alt="Active Risk Contribution Chart" />' if dashboard and dashboard.active_risk_contribution_chart else "<p class='hint'>차트 데이터를 불러올 수 없습니다.</p>"}
         <div style="margin-top:10px;">{_safe_table(dashboard.active_risk_contribution if dashboard else pd.DataFrame(), max_rows=10)}</div>
       </div>
       <div class="card">
@@ -664,7 +678,7 @@ def _risk_page(ctx: _PageContext) -> str:
         {_safe_table(dashboard.style_exposure if dashboard else pd.DataFrame())}
       </div>
       <div class="card">
-        <h3>팩터 분해</h3>
+        <h3 style="margin-top:0;">팩터 분해</h3>
         {_safe_table(dashboard.factor_risk if dashboard else pd.DataFrame())}
       </div>
     </div>
@@ -680,7 +694,7 @@ def _scoring_page(ctx: _PageContext) -> str:
         note = "<p class='hint'>ROE는 shared DB의 최근 4분기 재무 이력에서 계산하고, PER/PBR은 같은 재무 이력과 주가 DB를 결합해 분석 시점에 재계산합니다. 아직 fundamentals_quarterly 데이터가 없어서 현재는 가격/기술/뉴스 신호 중심으로 통합 점수가 계산됩니다.</p>"
 
     # 통합스코어 페이지의 종목 링크는 Pipeline Stock으로만 연결합니다.
-    # Pipeline Stock News 쪽으로는 연결하지 않습니다.
+    # Pipeline Stock News 쪽으로는 연결하지 않습니다. (이제는 통합되므로 내부 경로로 변경)
     def _with_stock_lab_links(df_in: pd.DataFrame | None) -> pd.DataFrame:
         if df_in is None or df_in.empty or 'ticker' not in df_in.columns:
             return df_in if df_in is not None else pd.DataFrame()
@@ -688,8 +702,8 @@ def _scoring_page(ctx: _PageContext) -> str:
         def _link(t: str) -> str:
             if t == "CASH": return t
             # 로컬 중계 경로를 통해 Stock Lab 자동 실행 후 리다이렉트
-            safe_ticker = str(t).strip().upper()
-            url = f"/redirect_stock_lab?ticker={quote(safe_ticker)}&intent=run"
+            safe_ticker = html.escape(str(t).strip().upper())
+            url = f"/stock-forecast?ticker={safe_ticker}&intent=run" # 내부 경로로 변경
             return (
                 f'<a href="{url}" '
                 f'onclick="return triggerStockLabSync(\'{safe_ticker}\', this.href);" '
@@ -703,14 +717,25 @@ def _scoring_page(ctx: _PageContext) -> str:
     recs_linked = _with_stock_lab_links(dashboard.top_recommendations if dashboard else None)
     details_linked = _with_stock_lab_links(scoring)
 
+    
+
+    # 중첩 f-string 및 잘못된 주석을 피하기 위해 미리 변수 처리
+    commentary_html = ""
+    if dashboard and dashboard.scoring_commentary:
+        commentary_html = f'<p class="hint">{html.escape(dashboard.scoring_commentary)}</p>'
+    
+    chart_score_html = "<p class='hint'>통합 스코어 차트를 불러올 수 없습니다.</p>"
+    if dashboard and dashboard.integrated_score_chart:
+        chart_score_html = f'<img src="data:image/png;base64,{dashboard.integrated_score_chart}" class="chart-img" style="max-width: 800px; margin: 0 auto; display: block;" />'
+
     body = f"""
     {_message_block(ctx)}
     {_date_range_form("scoring", ctx)}
     <div class="card">
-      <h2>통합 스코어링 엔진</h2>
+      <h2 style="margin-top:0;">통합 스코어링 엔진</h2>
       {note}
-      {f'<p class="hint">{html.escape(dashboard.scoring_commentary)}</p>' if dashboard and dashboard.scoring_commentary else ""}
-      {f'<img src="data:image/png;base64,{dashboard.integrated_score_chart}" class="chart-img" style="max-width: 800px; margin: 0 auto; display: block;" />' if dashboard and dashboard.integrated_score_chart else "<p class='hint'>통합 스코어 차트를 불러올 수 없습니다.</p>"}
+      {commentary_html}
+      {chart_score_html}
     </div>
     <div class="grid-2" style="margin-top: 12px;">
       <div class="card">
@@ -722,7 +747,7 @@ def _scoring_page(ctx: _PageContext) -> str:
         {_safe_table(worst_linked, max_rows=10, escape=False)}
       </div>
     </div>
-    <div class="card" style="margin-top: 12px; border-top: 4px solid var(--ok-line);">
+    <div class="card" style="margin-top: 12px; border-left: 5px solid var(--ok-line);">
       <h2>신규 추천 종목 (미보유 S&P500 상위 10)</h2>
       <p class="hint">현재 포트폴리오에 보유하지 않은 S&P500 종목 중 통합 스코어가 가장 높은 종목들입니다. 새로운 투자 기회 발굴에 참고하십시오.</p>
       {_safe_table(recs_linked, escape=False)}
@@ -732,19 +757,11 @@ def _scoring_page(ctx: _PageContext) -> str:
       {_safe_table(details_linked, escape=False)}
     </div>
     <script>
-      async function triggerStockLabSync(ticker, fallbackUrl) {{
-        try {{
-          const res = await fetch("/sync_stock_lab?ticker=" + encodeURIComponent(String(ticker || "")), {{ cache: "no-store" }});
-          const data = await res.json();
-          if (res.ok && data && data.ok) {{
-            return false;
-          }}
-        }} catch (err) {{
-        }}
-        if (fallbackUrl) {{
-          window.open(fallbackUrl, "keumj_stock_lab");
-        }}
-        return false;
+      function triggerStockLabSync(ticker, targetPath) {{
+        // Stock Lab 페이지로 이동하면서 티커를 전달
+        const url = targetPath + "?ticker=" + encodeURIComponent(ticker) + "&intent=run";
+        window.location.href = url;
+        return true; // 링크 클릭 시 페이지 이동을 막지 않음
       }}
     </script>
     """
@@ -757,7 +774,7 @@ def _virtual_trade_page(ctx: _PageContext) -> str:
     {_message_block(ctx)}
     {_date_range_form("virtual-trade", ctx)}
     <div class="card">
-      <h2>가상 거래</h2>
+      <h2 style="margin-top:0;">가상 거래</h2>
       <form method="post" action="/run_virtual_trade">
         <input type="hidden" name="lookback_days" value="{int(ctx.lookback_days)}">
         <input type="hidden" name="start_date" value="{html.escape(ctx.start_date)}">
@@ -766,7 +783,7 @@ def _virtual_trade_page(ctx: _PageContext) -> str:
           <div><label>티커</label><input type="text" name="ticker" placeholder="AAPL" required></div>
           <div><label>매수/매도</label><select name="side"><option value="BUY">BUY</option><option value="SELL">SELL</option></select></div>
           <div><label>수량</label><input type="number" min="0.0001" step="0.0001" name="quantity" required></div>
-          <div><label>가격(비우면 최신가)</label><input type="number" min="0.0001" step="0.0001" name="price"></div>
+          <div><label>가격(비우면 최신가)</label><input type="number" min="0.0001" step="0.0001" name="price" placeholder="자동"></div>
           <div><label>수수료</label><input type="number" min="0" step="0.0001" name="fees" value="0"></div>
           <div><label>예측 기간</label><input type="number" min="1" step="1" name="forecast_horizon_days" value="{DEFAULT_VIRTUAL_FORECAST_HORIZON_DAYS}"></div>
           <div><button type="submit">가상 거래 계산</button></div>
@@ -810,11 +827,17 @@ def _optimization_page(ctx: _PageContext) -> str:
         "max_position_pct": DEFAULT_MAX_POSITION_PCT,
         "cash_buffer_pct": DEFAULT_CASH_BUFFER_PCT,
     }
+    
+    # 최적화 차트 HTML 미리 준비
+    rep_chart = f'<img src="data:image/png;base64,{optimization.replication_chart}" class="chart-img" />' if optimization and optimization.replication_chart else ""
+    agg_chart = f'<img src="data:image/png;base64,{optimization.aggressive_chart}" class="chart-img" />' if optimization and optimization.aggressive_chart else ""
+    def_chart = f'<img src="data:image/png;base64,{optimization.defensive_chart}" class="chart-img" />' if optimization and optimization.defensive_chart else ""
+
     body = f"""
     {_message_block(ctx)}
     {_date_range_form("optimization", ctx)}
     <div class="card">
-      <h2>포트폴리오 최적화</h2>
+      <h2 style="margin-top:0;">포트폴리오 최적화</h2>
       <p class="hint">S&P500 복제, 공격형, 방어형 포트폴리오를 현재 보유 종목과 비교하면서 제약조건을 반영해 재구성합니다.</p>
       <form method="get" action="/optimization">
         <div class="form-grid">
@@ -838,9 +861,9 @@ def _optimization_page(ctx: _PageContext) -> str:
           <strong>방법:</strong> 유니버스 내에서 섹터 비중과 시가총액 가중치를 S&P 500 지수와 유사하게 매칭하여 재구성합니다.<br>
           <strong>제언:</strong> 포트폴리오의 중심(Core)을 잡을 때 활용하며, 지수 대비 소외되지 않는 안정적인 운영을 원할 때 적합합니다.
         </p>
-        {f'<img src="data:image/png;base64,{optimization.replication_chart}" class="chart-img" />' if optimization and optimization.replication_chart else ""}
-        {_safe_table(_format_opt_df(optimization.replication) if optimization else pd.DataFrame())}
-        {_render_strategy_impact(optimization.impact_summary, "복제") if optimization else ""}
+        {rep_chart}
+        {_safe_table(_format_opt_df(optimization.replication) if optimization and optimization.replication is not None else pd.DataFrame())}
+        {_render_strategy_impact(optimization.impact_summary, "복제") if optimization and optimization.impact_summary is not None else ""}
       </div>
       <div class="card">
         <h3>공격형</h3>
@@ -849,8 +872,8 @@ def _optimization_page(ctx: _PageContext) -> str:
           <strong>방법:</strong> 통합 스코어(기술적 신호, 뉴스, 재무 지표)가 높은 주도주에 가중치를 집중적으로 할당합니다.<br>
           <strong>제언:</strong> 상승 모멘텀이 강한 종목을 선점하고자 할 때 활용하십시오. 변동성이 높을 수 있으므로 분할 매수 관점으로 접근하는 것이 유리합니다.
         </p>
-        {f'<img src="data:image/png;base64,{optimization.aggressive_chart}" class="chart-img" />' if optimization and optimization.aggressive_chart else ""}
-        {_safe_table(_format_opt_df(optimization.aggressive) if optimization else pd.DataFrame())}
+        {agg_chart}
+        {_safe_table(_format_opt_df(optimization.aggressive) if optimization and optimization.aggressive is not None else pd.DataFrame())}
         {_render_strategy_impact(optimization.impact_summary, "공격") if optimization else ""}
       </div>
       <div class="card">
@@ -860,20 +883,20 @@ def _optimization_page(ctx: _PageContext) -> str:
           <strong>방법:</strong> 저변동성 종목과 재무 건전성이 우수한 종목을 중심으로 리스크 기여도를 낮추도록 최적화합니다.<br>
           <strong>제언:</strong> 시장의 불확실성이 크거나 자산 보호가 우선인 국면에서 비중을 늘리십시오. 장기적인 변동성 대비 수익성을 높이는 데 도움을 줍니다.
         </p>
-        {f'<img src="data:image/png;base64,{optimization.defensive_chart}" class="chart-img" />' if optimization and optimization.defensive_chart else ""}
-        {_safe_table(_format_opt_df(optimization.defensive) if optimization else pd.DataFrame())}
+        {def_chart}
+        {_safe_table(_format_opt_df(optimization.defensive) if optimization and optimization.defensive is not None else pd.DataFrame())}
         {_render_strategy_impact(optimization.impact_summary, "방어") if optimization else ""}
       </div>
     </div>
     <div class="card">
-      <h3>최적화 진단</h3>
+      <h3 style="margin-top:0;">최적화 진단</h3>
       {_safe_table(optimization.diagnostics if optimization else pd.DataFrame())}
     </div>
     """
     return _layout("Portfolio Lab | 최적화", "포트폴리오를 통한 SP500 복제와 성향별 구성 추천", "optimization", ctx, body)
 
 _REFRESH_JOB_DEFS: list[dict[str, str]] = [
-    {
+    { # Portfolio's own stock refresh
         "job_id": "stock",
         "label": "SP500 가격/시총",
         "description": "S&P500 가격 패널, 시가총액 CSV, shared SQLite 가격 테이블을 갱신합니다.",
@@ -881,6 +904,7 @@ _REFRESH_JOB_DEFS: list[dict[str, str]] = [
         "button_label": "가격/시총 갱신",
     },
     {
+        # Portfolio's own quarterly refresh
         "job_id": "quarterly",
         "label": "분기 재무",
         "description": "shared SQLite의 fundamentals_quarterly 테이블을 최신 분기 기준으로 채웁니다.",
@@ -888,6 +912,7 @@ _REFRESH_JOB_DEFS: list[dict[str, str]] = [
         "button_label": "분기 재무 갱신",
     },
     {
+        # Portfolio's own news refresh
         "job_id": "news",
         "label": "뉴스",
         "description": "S&P500 구성 종목 뉴스 기사와 뉴스 분석 대기열을 shared SQLite에 적재합니다.",
@@ -895,6 +920,20 @@ _REFRESH_JOB_DEFS: list[dict[str, str]] = [
         "button_label": "뉴스 갱신",
     },
 ]
+
+# Add refresh jobs from pipeline_stock.web_gui
+_REFRESH_JOB_DEFS.extend([
+    {
+        "job_id": "stock_lab_stock",
+        "label": "Stock Lab: SP500 가격/시총",
+        "description": "Stock Analysis Lab에서 사용하는 S&P500 가격 및 시가총액 데이터를 갱신합니다.",
+        "module": "pipeline_stock.cli", # This module has the refresh command
+        "command_args": ["refresh"],
+        "button_label": "Stock Lab 가격 갱신",
+        "is_stock_lab_refresh": True,
+    },
+])
+
 
 
 def _refresh_job_defs() -> list[dict[str, str]]:
@@ -937,13 +976,26 @@ def _refresh_subprocess_command(job_id: str) -> list[str]:
     job = _refresh_job_def(job_id)
     if job is None:
         return []
+
+    # pipeline_stock.cli의 refresh 명령을 직접 호출
+    if job.get("is_stock_lab_refresh"):
+        if getattr(sys, "frozen", False):
+            return [sys.executable, "refresh"] # Assuming 'refresh' is a top-level command in the frozen executable
+        return [sys.executable, "-u", "-m", "pipeline_stock.cli", "refresh"]
+
+    # pipeline_stock_news.cli의 refresh 명령을 직접 호출
+    if job.get("is_news_lab_refresh"):
+        if getattr(sys, "frozen", False):
+            return [sys.executable, "refresh-news"] # Assuming 'refresh-news' is a top-level command in the frozen executable
+        return [sys.executable, "-u", "-m", "pipeline_stock_news.cli", "refresh"]
+
     if getattr(sys, "frozen", False):
         refresh_command = {
             "stock": "refresh-stock",
             "quarterly": "refresh-quarterly",
             "news": "refresh-news",
         }.get(job_id)
-        if refresh_command is None:
+        if refresh_command is None: # Should not happen if job_id is valid
             return []
         return [sys.executable, refresh_command]
     return [sys.executable, "-u", "-m", job["module"]]
@@ -1130,11 +1182,11 @@ def _refresh_page(ctx: _PageContext) -> str:
               <div class="refresh-card-head">
                 <div>
                   <h2 class="refresh-card-title">{html.escape(job["label"])}</h2>
-                  <p class="hint refresh-card-desc">{html.escape(job["description"])}</p>
+                  <p class="hint refresh-card-desc" style="margin-top:0;">{html.escape(job["description"])}</p>
                 </div>
                 <div class="latest-inline" id="refresh-latest-{html.escape(job_id)}">
                   <strong>실행 전 최신 현황</strong>
-                  <div id="refresh-latest-summary-{html.escape(job_id)}">최신 현황 확인 중...</div>
+                  <div id="refresh-latest-summary-{html.escape(job_id)}" class="small">최신 현황 확인 중...</div>
                   <div id="refresh-latest-items-{html.escape(job_id)}"></div>
                 </div>
               </div>
@@ -1221,7 +1273,7 @@ def _refresh_page(ctx: _PageContext) -> str:
         if (summaryEl) {{
           summaryEl.textContent = summary || "현재 DB 상태를 확인할 수 없습니다.";
         }}
-        if (!itemsEl) return;
+        if (!itemsEl) {{ return; }}
         if (!items || items.length === 0) {{
           itemsEl.innerHTML = "";
           return;
@@ -1235,7 +1287,7 @@ def _refresh_page(ctx: _PageContext) -> str:
       }}
 
       function renderLogs(el, lines, emptyText) {{
-        if (!el) return;
+        if (!el) {{ return; }}
         if (!lines || lines.length === 0) {{
           el.innerHTML = "<div class='line'>" + escapeHtml(emptyText) + "</div>";
           return;
@@ -1246,7 +1298,7 @@ def _refresh_page(ctx: _PageContext) -> str:
 
       async function pollRefreshStatus() {{
         try {{
-          const res = await fetch("/refresh_status", {{ cache: "no-store" }});
+          const res = await fetch("/refresh_status", {{ cache: "no-store", headers: {{ 'X-Requested-With': 'fetch' }} }});
           if (!res.ok) return;
           const data = await res.json();
           const jobs = data.jobs || [];
@@ -1266,7 +1318,7 @@ def _refresh_page(ctx: _PageContext) -> str:
                 " / 시작: " + (job.started_at || "-") +
                 " / 종료: " + (job.finished_at || "-");
             }}
-            if (btnEl) {{
+            if (btnEl) {{ // 버튼 텍스트 및 활성화/비활성화 상태 업데이트
               const isBusy = Boolean(data.running);
               btnEl.disabled = isBusy;
               btnEl.style.opacity = isBusy ? "0.6" : "1";
@@ -1369,7 +1421,7 @@ def _format_opt_df(df: pd.DataFrame) -> pd.DataFrame:
         "integrated_score": "점수"
     }
     cols = ["ticker", "sector", "target_weight_pct", "current_weight_pct", "diff_weight_pct", "suggested_trade", "expected_return_pct", "volatility_pct", "integrated_score"]
-    out = df[[c for c in cols if c in df.columns]].copy()
+    out = df[[c for c in cols if c in df.columns]].copy() # Ensure columns exist before selecting
     for c in out.columns:
         if c == "diff_weight_pct":
             out[c] = out[c].map(lambda x: f"{x:+.1f}" if pd.notna(x) else "-")
@@ -1381,7 +1433,7 @@ def _format_opt_df(df: pd.DataFrame) -> pd.DataFrame:
 
 def _parse_lookback(raw: str | None) -> int:
     try:
-        return max(int(raw or DEFAULT_LOOKBACK_DAYS), 21)
+        return max(int(raw or DEFAULT_LOOKBACK_DAYS), 21) # Use DEFAULT_LOOKBACK_DAYS from portfolio.analysis
     except Exception:
         return DEFAULT_LOOKBACK_DAYS
 
@@ -2033,6 +2085,57 @@ def launch_web_gui(host: str = "localhost", port: int = 8515, open_browser: bool
                         )
                     )
                     return
+
+                # Stock Analysis Lab POST handlers
+                if path == "/run": # Forecast
+                    self._handle_stock_forecast_run(form)
+                    return
+                if path == "/run_financial":
+                    self._handle_stock_financials_run(form)
+                    return
+                if path == "/run_technical":
+                    self._handle_stock_technical_run(form)
+                    return
+                if path == "/run_returns":
+                    self._handle_stock_returns_run(form)
+                    return
+                if path == "/run_risk":
+                    self._handle_stock_risk_run(form)
+                    return
+                if path == "/run_factor":
+                    self._handle_stock_factor_run(form)
+                    return
+                if path == "/run_decision":
+                    self._handle_stock_decision_run(form)
+                    return
+                if path == "/run_walk_forward":
+                    self._handle_stock_wfv_run(form)
+                    return
+
+                # News Lab POST handlers
+                news_page_key = news_web_gui._page_key_from_path(path)
+                if path == "/run_overview":
+                    self._handle_news_run(form, news_web_gui._overview_page, "overview")
+                    return
+                if path == "/run_event_study":
+                    self._handle_news_run(form, news_web_gui._html_event_page, "event")
+                    return
+                if path == "/run_sector_spillover":
+                    self._handle_news_run(form, news_web_gui._html_spillover_page, "spillover")
+                    return
+                if path == "/run_divergence":
+                    self._handle_news_run(form, news_web_gui._html_divergence_page, "divergence")
+                    return
+                if path == "/run_expectation_reset":
+                    self._handle_news_run(form, news_web_gui._html_expectation_page, "expectation")
+                    return
+                if path == "/run_volatility_regime":
+                    self._handle_news_run(form, news_web_gui._html_volatility_page, "volatility")
+                    return
+                if path == "/run_topic_modeling":
+                    self._handle_news_run(form, news_web_gui._html_topics_page, "topics")
+                    return
+
                 if path == "/run_refresh":
                     job_id = str(form.get("job_id", "")).strip().lower()
                     job = _refresh_job_def(job_id)
@@ -2110,8 +2213,429 @@ def launch_web_gui(host: str = "localhost", port: int = 8515, open_browser: bool
                     )
                     return
                 self._send_html("<h1>Not Found</h1>", status=404)
-            except Exception as exc:
+            except Exception as exc: # Catch all exceptions and render an error page
                 self._render_error(exc, lookback_days=lookback_days, start_date=start_date, end_date=end_date)
+
+        # Stock Analysis Lab Handlers
+        def _handle_stock_forecast_run(self, form: dict[str, str]) -> None:
+            for checkbox in ["use_sample", "auto_save", "insecure_ssl"]:
+                if checkbox not in form:
+                    form[checkbox] = ""
+
+            intent = form.get("intent", "run").strip().lower() or "run"
+            insecure_ssl = form.get("insecure_ssl", "") == "on"
+            ca_bundle_path = form.get("ca_bundle_path", "").strip() or None
+
+            effective_ticker = self._resolve_ticker_and_update_common_note(form.get("ticker", ""), ca_bundle_path, insecure_ssl)
+
+            self.__class__.stock_forecast_form = {
+                "ticker": effective_ticker,
+                "forecast_horizon": form.get("forecast_horizon", "10"),
+                "history_years": form.get("history_years", "8"),
+                "start_date": form.get("start_date", ""),
+                "end_date": form.get("end_date", datetime.utcnow().strftime("%Y-%m-%d")),
+                "output_dir": form.get("output_dir", "outputs/stock_forecast"),
+                "prices_csv_path": form.get("prices_csv_path", ""),
+                "use_sample": form.get("use_sample", ""),
+                "auto_save": form.get("auto_save", ""),
+                "insecure_ssl": form.get("insecure_ssl", ""),
+                "ca_bundle_path": form.get("ca_bundle_path", ""),
+            }
+            self.__class__._sync_cross_page_tickers(effective_ticker)
+
+            if intent == "resolve_ticker":
+                self.__class__.stock_forecast_error = None
+                self.send_response(303)
+                self.send_header("Location", "/stock-forecast")
+                self.end_headers()
+                return
+
+            if self.common_ticker_note_error and not effective_ticker:
+                self.__class__.stock_forecast_ctx = None
+                self.__class__.stock_forecast_error = self.common_ticker_note or "Provide ticker, or set Local Prices CSV Path Override."
+                self.send_response(303)
+                self.send_header("Location", "/stock-forecast")
+                self.end_headers()
+                return
+
+            try:
+                self.__class__.stock_forecast_ctx = stock_web_gui._run_once(self.stock_forecast_form)
+                self.__class__.stock_forecast_error = None
+            except Exception as exc:
+                self.__class__.stock_forecast_ctx = None
+                out_dir = Path(self.stock_forecast_form.get("output_dir", "outputs/stock_forecast"))
+                hint = stock_web_gui.security_hint(exc, output_dir=out_dir)
+                if isinstance(exc, ValueError):
+                    self.__class__.stock_forecast_error = str(exc)
+                else:
+                    self.__class__.stock_forecast_error = f"{hint}\n\nRaw error: {exc}" if hint else traceback.format_exc()
+            self.send_response(303)
+            self.send_header("Location", "/stock-forecast")
+            self.end_headers()
+
+        def _handle_stock_financials_run(self, form: dict[str, str]) -> None:
+            for checkbox in ["auto_save", "insecure_ssl"]:
+                if checkbox not in form:
+                    form[checkbox] = ""
+
+            intent = form.get("intent", "run").strip().lower() or "run"
+            insecure_ssl = form.get("insecure_ssl", "") == "on"
+            ca_bundle_path = form.get("ca_bundle_path", "").strip() or None
+
+            effective_ticker = self._resolve_ticker_and_update_common_note(form.get("ticker", ""), ca_bundle_path, insecure_ssl)
+
+            self.__class__.stock_financials_form = {
+                "ticker": effective_ticker,
+                "statement_periods": form.get("statement_periods", "4"),
+                "output_dir": form.get("output_dir", "outputs/stock_forecast_finance"),
+                "auto_save": form.get("auto_save", ""),
+                "insecure_ssl": form.get("insecure_ssl", ""),
+                "ca_bundle_path": form.get("ca_bundle_path", ""),
+                "fmp_api_key": form.get("fmp_api_key", ""),
+            }
+            self.__class__._sync_cross_page_tickers(effective_ticker)
+
+            if intent == "resolve_ticker":
+                self.__class__.stock_financials_error = None
+                self.send_response(303)
+                self.send_header("Location", "/stock-financials")
+                self.end_headers()
+                return
+
+            if self.common_ticker_note_error and not effective_ticker:
+                self.__class__.stock_financials_ctx = None
+                self.__class__.stock_financials_error = self.common_ticker_note or "Provide ticker for financial statements page."
+                self.send_response(303)
+                self.send_header("Location", "/stock-financials")
+                self.end_headers()
+                return
+
+            cache_key = self._financial_cache_key(self.stock_financials_form)
+            cached = self.stock_financials_cache.get(cache_key)
+            if cached is not None:
+                self.__class__.stock_financials_ctx = cached
+                self.__class__.stock_financials_error = None
+            else:
+                try:
+                    fin_ctx = stock_web_gui._run_financial_once(self.stock_financials_form)
+                    self.__class__.stock_financials_ctx = fin_ctx
+                    self.__class__.stock_financials_cache[cache_key] = fin_ctx
+                    self.__class__.stock_financials_error = None
+                except Exception as exc:
+                    self.__class__.stock_financials_ctx = None
+                    out_dir = Path(self.stock_financials_form.get("output_dir", "outputs/stock_forecast_finance"))
+                    hint = stock_web_gui.security_hint(exc, output_dir=out_dir)
+                    if isinstance(exc, ValueError):
+                        self.__class__.stock_financials_error = str(exc)
+                    else:
+                        self.__class__.stock_financials_error = (
+                            f"{hint}\n\nRaw error: {exc}" if hint else traceback.format_exc()
+                        )
+            self.send_response(303)
+            self.send_header("Location", "/stock-financials")
+            self.end_headers()
+
+        def _handle_stock_technical_run(self, form: dict[str, str]) -> None:
+            for checkbox in ["use_sample", "auto_save"]:
+                if checkbox not in form:
+                    form[checkbox] = ""
+
+            intent = form.get("intent", "run").strip().lower() or "run"
+            effective_ticker = self._resolve_ticker_and_update_common_note(form.get("ticker", ""), None, False)
+            action = stock_web_gui._normalize_technical_action(form.get("action", "all"))
+
+            self.__class__.stock_technical_form = {
+                "ticker": effective_ticker,
+                "output_dir": form.get("output_dir", "outputs/technical_analysis"),
+                "use_sample": form.get("use_sample", ""),
+                "auto_save": form.get("auto_save", ""),
+                "action": action,
+            }
+            self.__class__._sync_cross_page_tickers(effective_ticker)
+
+            if intent == "resolve_ticker":
+                self.__class__.stock_technical_error = None
+                self.send_response(303)
+                self.send_header("Location", "/stock-technical")
+                self.end_headers()
+                return
+
+            if self.common_ticker_note_error and not effective_ticker:
+                self.__class__.stock_technical_ctx = None
+                self.__class__.stock_technical_error = self.common_ticker_note or "Provide ticker for technical analysis."
+                self.send_response(303)
+                self.send_header("Location", "/stock-technical")
+                self.end_headers()
+                return
+
+            try:
+                ta_ctx, ta_cache = stock_web_gui.ta_web_gui._run_analysis(
+                    form=self.stock_technical_form,
+                    action=action,
+                    cache=self.stock_technical_cache,
+                )
+                self.__class__.stock_technical_ctx = ta_ctx
+                self.__class__.stock_technical_cache = ta_cache
+                self.__class__.stock_technical_error = None
+            except Exception as exc:
+                self.__class__.stock_technical_ctx = None
+                out_dir = Path(self.stock_technical_form.get("output_dir", "outputs/technical_analysis"))
+                hint = stock_web_gui.security_hint(exc, output_dir=out_dir)
+                if isinstance(exc, ValueError):
+                    self.__class__.stock_technical_error = str(exc)
+                else:
+                    self.__class__.stock_technical_error = f"{hint}\n\nRaw error: {exc}" if hint else traceback.format_exc()
+            self.send_response(303)
+            self.send_header("Location", "/stock-technical")
+            self.end_headers()
+
+        def _handle_stock_returns_run(self, form: dict[str, str]) -> None:
+            intent = form.get("intent", "run").strip().lower() or "run"
+            effective_ticker = self._resolve_ticker_and_update_common_note(form.get("ticker", ""), None, False)
+            self.__class__.stock_returns_form = {"ticker": effective_ticker}
+            self.__class__._sync_cross_page_tickers(effective_ticker)
+
+            if intent == "resolve_ticker":
+                self.__class__.stock_returns_error = None
+                self.send_response(303)
+                self.send_header("Location", "/stock-returns")
+                self.end_headers()
+                return
+
+            if self.common_ticker_note_error and not effective_ticker:
+                self.__class__.stock_returns_ctx = None
+                self.__class__.stock_returns_error = self.common_ticker_note or "Provide an S&P 500 ticker for return analysis."
+                self.send_response(303)
+                self.send_header("Location", "/stock-returns")
+                self.end_headers()
+                return
+
+            try:
+                self.__class__.stock_returns_ctx = stock_web_gui._run_returns_once(self.stock_returns_form)
+                self.__class__.stock_returns_error = None
+            except Exception as exc:
+                self.__class__.stock_returns_ctx = None
+                if isinstance(exc, ValueError):
+                    self.__class__.stock_returns_error = str(exc)
+                else:
+                    self.__class__.stock_returns_error = traceback.format_exc()
+            self.send_response(303)
+            self.send_header("Location", "/stock-returns")
+            self.end_headers()
+
+        def _handle_stock_risk_run(self, form: dict[str, str]) -> None:
+            intent = form.get("intent", "run").strip().lower() or "run"
+            effective_ticker = self._resolve_ticker_and_update_common_note(form.get("ticker", ""), None, False)
+            self.__class__.stock_risk_form = {"ticker": effective_ticker}
+            self.__class__._sync_cross_page_tickers(effective_ticker)
+
+            if intent == "resolve_ticker":
+                self.__class__.stock_risk_error = None
+                self.send_response(303)
+                self.send_header("Location", "/stock-risk")
+                self.end_headers()
+                return
+
+            if self.common_ticker_note_error and not effective_ticker:
+                self.__class__.stock_risk_ctx = None
+                self.__class__.stock_risk_error = self.common_ticker_note or "Provide an S&P 500 ticker for risk analysis."
+                self.send_response(303)
+                self.send_header("Location", "/stock-risk")
+                self.end_headers()
+                return
+
+            try:
+                self.__class__.stock_risk_ctx = stock_web_gui._run_risk_once(self.stock_risk_form)
+                self.__class__.stock_risk_error = None
+            except Exception as exc:
+                self.__class__.stock_risk_ctx = None
+                if isinstance(exc, ValueError):
+                    self.__class__.stock_risk_error = str(exc)
+                else:
+                    self.__class__.stock_risk_error = traceback.format_exc()
+            self.send_response(303)
+            self.send_header("Location", "/stock-risk")
+            self.end_headers()
+
+        def _handle_stock_factor_run(self, form: dict[str, str]) -> None:
+            intent = form.get("intent", "run").strip().lower() or "run"
+            effective_ticker = self._resolve_ticker_and_update_common_note(form.get("ticker", ""), None, False)
+            self.__class__.stock_factor_form = {"ticker": effective_ticker}
+            self.__class__._sync_cross_page_tickers(effective_ticker)
+
+            if intent == "resolve_ticker":
+                self.__class__.stock_factor_error = None
+                self.send_response(303)
+                self.send_header("Location", "/stock-factor")
+                self.end_headers()
+                return
+
+            if self.common_ticker_note_error and not effective_ticker:
+                self.__class__.stock_factor_ctx = None
+                self.__class__.stock_factor_error = self.common_ticker_note or "Provide an S&P 500 ticker for factor and regime analysis."
+                self.send_response(303)
+                self.send_header("Location", "/stock-factor")
+                self.end_headers()
+                return
+
+            try:
+                self.__class__.stock_factor_ctx = stock_web_gui._run_factor_once(self.stock_factor_form)
+                self.__class__.stock_factor_error = None
+            except Exception as exc:
+                self.__class__.stock_factor_ctx = None
+                if isinstance(exc, ValueError):
+                    self.__class__.stock_factor_error = str(exc)
+                else:
+                    self.__class__.stock_factor_error = traceback.format_exc()
+            self.send_response(303)
+            self.send_header("Location", "/stock-factor")
+            self.end_headers()
+
+        def _handle_stock_decision_run(self, form: dict[str, str]) -> None:
+            intent = form.get("intent", "run").strip().lower() or "run"
+            effective_ticker = self._resolve_ticker_and_update_common_note(form.get("ticker", ""), None, False)
+            self.__class__.stock_decision_form = {"ticker": effective_ticker}
+            self.__class__._sync_cross_page_tickers(effective_ticker)
+
+            if intent == "resolve_ticker":
+                self.__class__.stock_decision_error = None
+                self.send_response(303)
+                self.send_header("Location", "/stock-decision")
+                self.end_headers()
+                return
+
+            if self.common_ticker_note_error and not effective_ticker:
+                self.__class__.stock_decision_ctx = None
+                self.__class__.stock_decision_error = self.common_ticker_note or "Provide an S&P 500 ticker for decision analysis."
+                self.send_response(303)
+                self.send_header("Location", "/stock-decision")
+                self.end_headers()
+                return
+
+            try:
+                # Ensure returns and risk contexts are available
+                if self.stock_returns_ctx is None or self.stock_returns_ctx.ticker != effective_ticker:
+                    self.__class__.stock_returns_form = {"ticker": effective_ticker}
+                    self.__class__.stock_returns_ctx = stock_web_gui._run_returns_once(self.stock_returns_form)
+                    self.__class__.stock_returns_error = None
+                if self.stock_risk_ctx is None or self.stock_risk_ctx.ticker != effective_ticker:
+                    self.__class__.stock_risk_form = {"ticker": effective_ticker}
+                    self.__class__.stock_risk_ctx = stock_web_gui._run_risk_once(self.stock_risk_form)
+                    self.__class__.stock_risk_error = None
+
+                fin_ctx = self.stock_financials_ctx if self.stock_financials_ctx is not None and self.stock_financials_ctx.ticker.strip().upper() == effective_ticker else None
+                self.__class__.stock_decision_ctx = stock_web_gui._run_decision_once(
+                    self.stock_decision_form,
+                    returns_ctx=self.stock_returns_ctx,
+                    risk_ctx=self.stock_risk_ctx,
+                    fin_ctx=fin_ctx,
+                )
+                self.__class__.stock_decision_error = None
+            except Exception as exc:
+                self.__class__.stock_decision_ctx = None
+                if isinstance(exc, ValueError):
+                    self.__class__.stock_decision_error = str(exc)
+                else:
+                    self.__class__.stock_decision_error = traceback.format_exc()
+            self.send_response(303)
+            self.send_header("Location", "/stock-decision")
+            self.end_headers()
+
+        def _handle_stock_wfv_run(self, form: dict[str, str]) -> None:
+            for checkbox in ["use_sample", "auto_save", "insecure_ssl"]:
+                if checkbox not in form:
+                    form[checkbox] = ""
+
+            intent = form.get("intent", "run").strip().lower() or "run"
+            insecure_ssl = form.get("insecure_ssl", "") == "on"
+            ca_bundle_path = form.get("ca_bundle_path", "").strip() or None
+
+            effective_ticker = self._resolve_ticker_and_update_common_note(form.get("ticker", ""), ca_bundle_path, insecure_ssl)
+
+            self.__class__.stock_wfv_form = {
+                "ticker": effective_ticker,
+                "forecast_horizon": form.get("forecast_horizon", "10"),
+                "history_years": form.get("history_years", "8"),
+                "start_date": form.get("start_date", ""),
+                "end_date": form.get("end_date", datetime.utcnow().strftime("%Y-%m-%d")),
+                "wf_min_train_rows": form.get("wf_min_train_rows", "252"),
+                "wf_step_size": form.get("wf_step_size", "21"),
+                "wf_max_splits": form.get("wf_max_splits", "4"),
+                "output_dir": form.get("output_dir", "outputs/walk_forward_validation"),
+                "prices_csv_path": form.get("prices_csv_path", ""),
+                "use_sample": form.get("use_sample", ""),
+                "auto_save": form.get("auto_save", ""),
+                "insecure_ssl": form.get("insecure_ssl", ""),
+                "ca_bundle_path": form.get("ca_bundle_path", ""),
+            }
+            self.__class__._sync_cross_page_tickers(effective_ticker)
+
+            if intent == "resolve_ticker":
+                self.__class__.stock_wfv_error = None
+                self.send_response(303)
+                self.send_header("Location", "/stock-wfv")
+                self.end_headers()
+                return
+
+            if self.common_ticker_note_error and not effective_ticker and not form.get("prices_csv_path", "").strip() and form.get("use_sample", "") != "on":
+                self.__class__.stock_wfv_ctx = None
+                self.__class__.stock_wfv_error = self.common_ticker_note or "Provide ticker, or set Local Prices CSV Path Override."
+                self.send_response(303)
+                self.send_header("Location", "/stock-wfv")
+                self.end_headers()
+                return
+
+            try:
+                self.__class__.stock_wfv_ctx = stock_web_gui._run_walk_forward_validation_once(self.stock_wfv_form)
+                self.__class__.stock_wfv_error = None
+            except Exception as exc:
+                self.__class__.stock_wfv_ctx = None
+                out_dir = Path(self.stock_wfv_form.get("output_dir", "outputs/walk_forward_validation"))
+                hint = stock_web_gui.security_hint(exc, output_dir=out_dir)
+                if isinstance(exc, ValueError):
+                    self.__class__.stock_wfv_error = str(exc)
+                else:
+                    self.__class__.stock_wfv_error = f"{hint}\n\nRaw error: {exc}" if hint else traceback.format_exc()
+            self.send_response(303)
+            self.send_header("Location", "/stock-wfv")
+            self.end_headers()
+
+        # News Lab Handlers
+        def _handle_news_run(self, form: dict[str, str], render_page_func, page_key: str) -> None:
+            intent = str(form.get("intent", "run")).strip().lower()
+            effective_ticker = self._resolve_ticker_and_update_common_note(form.get("ticker", ""), None, False)
+
+            page_form = dict(form)
+            page_form["ticker"] = effective_ticker
+            self.__class__._news_store_page_form(page_key, page_form)
+            self.__class__._sync_cross_page_tickers(effective_ticker)
+
+            if intent == "resolve_ticker":
+                self.__class__._news_store_page_note(page_key, page_form, self.common_ticker_note, self.common_ticker_note_error)
+                self.send_response(303)
+                self.send_header("Location", f"/{page_key}")
+                self.end_headers()
+                return
+
+            if self.common_ticker_note_error and not effective_ticker:
+                self.__class__._news_store_page_error(page_key, page_form, self.common_ticker_note or "Provide ticker for news analysis.")
+                self.send_response(303)
+                self.send_header("Location", f"/{page_key}")
+                self.end_headers()
+                return
+
+            try:
+                dashboard = news_web_gui._build_dashboard_from_form(page_form, page_key)
+                self.__class__._news_store_page_result(page_key, page_form, dashboard)
+            except Exception as exc:
+                self.__class__._news_store_page_error(
+                    page_key,
+                    page_form,
+                    f"{type(exc).__name__}: {exc}\n\n{traceback.format_exc(limit=2)}",
+                )
+            self.send_response(303)
+            self.send_header("Location", f"/{page_key}")
+            self.end_headers()
 
         def log_message(self, format: str, *args) -> None:  # noqa: A003
             return
@@ -2127,3 +2651,6 @@ def launch_web_gui(host: str = "localhost", port: int = 8515, open_browser: bool
     finally:
         server.server_close()
     return server
+
+if __name__ == "__main__":
+    launch_web_gui(port=8515, open_browser=True)

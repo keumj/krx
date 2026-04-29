@@ -12,6 +12,7 @@ import pandas as pd
 
 DEFAULT_SHARED_DB_ROOT = Path(os.getenv("KEUMJ_SP500_DB_DIR", "data/sp500_shared_db"))
 DEFAULT_SQLITE_NAME = str(os.getenv("KEUMJ_SP500_DB_SQLITE_NAME", "sp500_shared_prices.sqlite")).strip() or "sp500_shared_prices.sqlite"
+TREASURY_DATASET = "treasury_yields" # Define TREASURY_DATASET here
 NEWS_ANALYSIS_STATUS_PENDING = "pending"
 NEWS_ANALYSIS_STATUS_PROCESSING = "processing"
 NEWS_ANALYSIS_STATUS_DONE = "done"
@@ -1214,6 +1215,107 @@ def load_shared_market_caps_for_symbols(
             return pivot, f"sqlite:{target.as_posix()}"
 
     return None, None
+
+
+def load_financial_market_series(
+    dataset: str,
+    *,
+    series_id: str,
+    start_date: str | pd.Timestamp,
+    end_date: str | pd.Timestamp | None = None,
+    shared_db_root: Path | str | None = None,
+    db_path: Path | str | None = None,
+) -> tuple[pd.Series | None, str | None]:
+    root = _resolve_shared_root(shared_db_root)
+    target = Path(db_path) if db_path is not None else shared_prices_sqlite_path(root)
+    start_text = pd.Timestamp(start_date).normalize().strftime("%Y-%m-%d")
+    end_text = pd.Timestamp(end_date).normalize().strftime("%Y-%m-%d") if end_date is not None else None
+
+    if not target.exists() or not target.is_file():
+        return None, None
+
+    with sqlite3.connect(target) as conn:
+        _ensure_prices_table_schema(conn) # Ensure table exists
+        query = f"SELECT date, value FROM {dataset} WHERE series_id = ?"
+        params: list[object] = [series_id]
+        query += " AND date >= ?"
+        params.append(start_text)
+        if end_text is not None:
+            query += " AND date <= ?"
+            params.append(end_text)
+        query += " ORDER BY date"
+
+        try:
+            raw = pd.read_sql_query(query, conn, params=params)
+        except Exception:
+            return None, None
+
+    if raw.empty:
+        return None, None
+
+    raw["date"] = pd.to_datetime(raw["date"], errors="coerce")
+    raw["value"] = pd.to_numeric(raw["value"], errors="coerce")
+    raw = raw.dropna(subset=["date", "value"]).sort_values("date")
+    if raw.empty:
+        return None, None
+
+    s = pd.Series(raw["value"].values, index=raw["date"].dt.normalize(), name=series_id)
+    s = s[~s.index.duplicated(keep="last")]
+    return s if not s.empty else None, f"sqlite:{target.as_posix()}"
+
+
+def load_financial_market_frame(
+    dataset: str,
+    *,
+    series_ids: list[str],
+    start_date: str | pd.Timestamp,
+    end_date: str | pd.Timestamp | None = None,
+    shared_db_root: Path | str | None = None,
+    db_path: Path | str | None = None,
+) -> tuple[pd.DataFrame | None, str | None]:
+    if not series_ids:
+        return None, None
+
+    root = _resolve_shared_root(shared_db_root)
+    target = Path(db_path) if db_path is not None else shared_prices_sqlite_path(root)
+    start_text = pd.Timestamp(start_date).normalize().strftime("%Y-%m-%d")
+    end_text = pd.Timestamp(end_date).normalize().strftime("%Y-%m-%d") if end_date is not None else None
+
+    if not target.exists() or not target.is_file():
+        return None, None
+
+    with sqlite3.connect(target) as conn:
+        _ensure_prices_table_schema(conn) # Ensure table exists
+        placeholders = ",".join(["?"] * len(series_ids))
+        query = f"SELECT date, series_id, value FROM {dataset} WHERE series_id IN ({placeholders})"
+        params: list[object] = list(series_ids)
+        query += " AND date >= ?"
+        params.append(start_text)
+        if end_text is not None:
+            query += " AND date <= ?"
+            params.append(end_text)
+        query += " ORDER BY date, series_id"
+
+        try:
+            raw = pd.read_sql_query(query, conn, params=params)
+        except Exception:
+            return None, None
+
+    if raw.empty:
+        return None, None
+
+    raw["date"] = pd.to_datetime(raw["date"], errors="coerce")
+    raw["value"] = pd.to_numeric(raw["value"], errors="coerce")
+    raw = raw.dropna(subset=["date", "series_id", "value"])
+    if raw.empty:
+        return None, None
+
+    pivot = raw.pivot_table(index="date", columns="series_id", values="value", aggfunc="last").sort_index()
+    columns = [sid for sid in series_ids if sid in pivot.columns]
+    if not columns:
+        return None, None
+    pivot = pivot[columns].dropna(how="all")
+    return pivot if not pivot.empty else None, f"sqlite:{target.as_posix()}"
 
 
 def main() -> int:

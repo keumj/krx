@@ -217,7 +217,6 @@ class _WalkForwardContext:
 
 
 _RETURN_PERIOD_LABELS = ("3Y", "1Y", "6M", "1M", "YTD", "MTD")
-_APP_TITLE = "Stock Analysis Lab | S&P500"
 
 
 def _format_pct(value: object, ndigits: int = 2) -> str:
@@ -4075,7 +4074,7 @@ def _run_financial_once(form: dict[str, str]) -> _FinancialContext:
     )
 
 
-def _nav(active: str, *, enable_technical_page: bool = False) -> str:
+def _nav(active: str, *, enable_technical_page: bool = False, is_sub_page: bool = False) -> str:
     c1 = "active" if active == "page1" else ""
     c2 = "active" if active == "page2" else ""
     c3 = "active" if active == "page3" else ""
@@ -4124,6 +4123,8 @@ def _nav(active: str, *, enable_technical_page: bool = False) -> str:
           })();
         </script>
         """
+    if is_sub_page: # Sub-pages should not render their own navigation
+        return ""
     return f"""
     <div class="nav">
       <a class="{c1}" href="/forecast">주가 예측</a>
@@ -4139,7 +4140,7 @@ def _nav(active: str, *, enable_technical_page: bool = False) -> str:
     """
 
 
-def _base_css() -> str:
+def _base_css(is_sub_page: bool = False) -> str:
     return """
     :root {
       --bg: #f3f5f7;
@@ -4209,7 +4210,7 @@ def _base_css() -> str:
     """
 
 
-def _page_head(title: str) -> str:
+def _page_head(title: str, is_sub_page: bool = False) -> str:
     return (
         "<div class=\"page-head\">"
         f"<h1>{html.escape(title)}</h1>"
@@ -4304,17 +4305,19 @@ def _html_page(
         </div>
         """
 
-    return f"""<!doctype html>
+    head_content = ""
+    if not is_sub_page:
+        head_content = f"""<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>{_APP_TITLE} - 주가 예측</title>
-  <style>
-    {_base_css()}
-  </style>
+  <title>Stock Analysis Lab | S&P500 - 주가 예측</title>
+  <style>{_base_css()}</style>
 </head>
-<body>
+<body>"""
+
+    body_content = f"""
   <div class="wrap">
     {_page_head(_APP_TITLE)}
     <div class="sub">선택한 티커 또는 로컬 가격 CSV를 바탕으로 10영업일 앙상블 주가 예측을 수행하는 페이지</div>
@@ -4342,10 +4345,11 @@ def _html_page(
     {metric_html}
     {charts_html}
     {tables_html}
-  </div>
-</body>
-</html>
-"""
+  </div>"""
+
+    if is_sub_page:
+        return body_content
+    return head_content + body_content + "</body>\n</html>\n"
 
 
 def _html_walk_forward_page(
@@ -4354,6 +4358,7 @@ def _html_walk_forward_page(
     ctx: _WalkForwardContext | None,
     error: str | None,
     ticker_note: str | None = None,
+    is_sub_page: bool = False,
     ticker_note_error: bool = False,
 ) -> str:
     defaults = {
@@ -4450,17 +4455,19 @@ def _html_walk_forward_page(
         </div>
         """
 
-    return f"""<!doctype html>
+    head_content = ""
+    if not is_sub_page:
+        head_content = f"""<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>{_APP_TITLE} - 워크포워드 검증</title>
-  <style>
-    {_base_css()}
-  </style>
+  <title>Stock Analysis Lab | S&P500 - 워크포워드 검증</title>
+  <style>{_base_css()}</style>
 </head>
-<body>
+<body>"""
+
+    body_content = f"""
   <div class="wrap">
     {_page_head(_APP_TITLE)}
     <div class="sub">워크-포워드 검증으로 예측 엔진의 반복 성능을 점검하고 결과를 쉽게 해석하는 페이지</div>
@@ -4505,6 +4512,7 @@ def _html_financial_page(
     error: str | None,
     ticker_note: str | None = None,
     ticker_note_error: bool = False,
+    is_sub_page: bool = False,
     enable_technical_page: bool = False,
 ) -> str:
     defaults = {
@@ -4560,17 +4568,19 @@ def _html_financial_page(
         </div>
         """
 
-    return f"""<!doctype html>
+    head_content = ""
+    if not is_sub_page:
+        head_content = f"""<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>{_APP_TITLE} - 재무제표·밸류에이션</title>
-  <style>
-    {_base_css()}
-  </style>
+  <title>Stock Analysis Lab | S&P500 - 재무제표·밸류에이션</title>
+  <style>{_base_css()}</style>
 </head>
-  <body>
+<body>"""
+
+    body_content = f"""
   <div class="wrap">
     {_page_head(_APP_TITLE)}
     <div class="sub">티커 기준 재무제표와 밸류에이션 지표(PER/PBR)를 한 번에 확인하는 페이지</div>
@@ -4594,9 +4604,11 @@ def _html_financial_page(
     {metric_html}
     {tables_html}
   </div>
-</body>
-</html>
 """
+
+    if is_sub_page:
+        return body_content
+    return head_content + body_content + "</body>\n</html>\n"
 
 
 def _normalize_technical_action(action: str) -> str:
@@ -4610,6 +4622,7 @@ def _html_technical_page(
     ctx: ta_web_gui._RunContext | None,
     error: str | None,
     ticker_note: str | None = None,
+    is_sub_page: bool = False,
     ticker_note_error: bool = False,
 ) -> str:
     defaults = {
@@ -4667,17 +4680,19 @@ def _html_technical_page(
         </div>
         """
 
-    return f"""<!doctype html>
+    head_content = ""
+    if not is_sub_page:
+        head_content = f"""<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>{_APP_TITLE} - 기술적 분석</title>
-  <style>
-    {_base_css()}
-  </style>
+  <title>Stock Analysis Lab | S&P500 - 기술적 분석</title>
+  <style>{_base_css()}</style>
 </head>
-<body>
+<body>"""
+
+    body_content = f"""
   <div class="wrap">
     {_page_head(_APP_TITLE)}
     <div class="sub">이동평균선, 캔들, RSI, MACD 차트로 기술적 흐름을 점검하는 페이지</div>
@@ -4705,9 +4720,11 @@ def _html_technical_page(
     {table_html}
     {charts_html}
   </div>
-</body>
-</html>
 """
+
+    if is_sub_page:
+        return body_content
+    return head_content + body_content + "</body>\n</html>\n"
 
 
 def _html_returns_page(
@@ -4716,6 +4733,7 @@ def _html_returns_page(
     ctx: _ReturnsContext | None,
     error: str | None,
     ticker_note: str | None = None,
+    is_sub_page: bool = False,
     ticker_note_error: bool = False,
 ) -> str:
     defaults = {
@@ -4787,17 +4805,19 @@ def _html_returns_page(
         </div>
         """
 
-    return f"""<!doctype html>
+    head_content = ""
+    if not is_sub_page:
+        head_content = f"""<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>{_APP_TITLE} - 수익률 비교</title>
-  <style>
-    {_base_css()}
-  </style>
+  <title>Stock Analysis Lab | S&P500 - 수익률 비교</title>
+  <style>{_base_css()}</style>
 </head>
-<body>
+<body>"""
+
+    body_content = f"""
   <div class="wrap">
     {_page_head(_APP_TITLE)}
     <div class="sub">공유 S&P 500 데이터로 종목 수익률과 섹터·지수 상대강도를 비교하는 페이지</div>
@@ -4816,10 +4836,11 @@ def _html_returns_page(
     {charts_html}
     {tables_html}
     {ranking_html}
-  </div>
-</body>
-</html>
-"""
+  </div>"""
+
+    if is_sub_page:
+        return body_content
+    return head_content + body_content + "</body>\n</html>\n"
 
 
 def _html_risk_page(
@@ -4828,6 +4849,7 @@ def _html_risk_page(
     ctx: _RiskContext | None,
     error: str | None,
     ticker_note: str | None = None,
+    is_sub_page: bool = False,
     ticker_note_error: bool = False,
 ) -> str:
     defaults = {
@@ -4903,17 +4925,19 @@ def _html_risk_page(
         </div>
         """
 
-    return f"""<!doctype html>
+    head_content = ""
+    if not is_sub_page:
+        head_content = f"""<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>{_APP_TITLE} - 리스크 대시보드</title>
-  <style>
-    {_base_css()}
-  </style>
+  <title>Stock Analysis Lab | S&P500 - 리스크 대시보드</title>
+  <style>{_base_css()}</style>
 </head>
-<body>
+<body>"""
+
+    body_content = f"""
   <div class="wrap">
     {_page_head(_APP_TITLE)}
     <div class="sub">공유 S&P 500 데이터로 변동성, 낙폭, 베타를 점검하는 리스크 페이지</div>
@@ -4933,10 +4957,11 @@ def _html_risk_page(
     {charts_html}
     {tables_html}
     {ranking_html}
-  </div>
-</body>
-</html>
-"""
+  </div>"""
+
+    if is_sub_page:
+        return body_content
+    return head_content + body_content + "</body>\n</html>\n"
 
 
 def _html_factor_page(
@@ -4945,6 +4970,7 @@ def _html_factor_page(
     ctx: _FactorContext | None,
     error: str | None,
     ticker_note: str | None = None,
+    is_sub_page: bool = False,
     ticker_note_error: bool = False,
 ) -> str:
     defaults = {
@@ -5026,17 +5052,19 @@ def _html_factor_page(
         </div>
         """
 
-    return f"""<!doctype html>
+    head_content = ""
+    if not is_sub_page:
+        head_content = f"""<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>{_APP_TITLE} - 팩터·레짐 랩</title>
-  <style>
-    {_base_css()}
-  </style>
+  <title>Stock Analysis Lab | S&P500 - 팩터·레짐 랩</title>
+  <style>{_base_css()}</style>
 </head>
-<body>
+<body>"""
+
+    body_content = f"""
   <div class="wrap">
     {_page_head(_APP_TITLE)}
     <div class="sub">시장과 섹터 요인 분해를 통해 종목의 현재 국면을 읽는 실험용 팩터·레짐 페이지</div>
@@ -5055,10 +5083,11 @@ def _html_factor_page(
     {explanation_html}
     {charts_html}
     {tables_html}
-  </div>
-</body>
-</html>
-"""
+  </div>"""
+
+    if is_sub_page:
+        return body_content
+    return head_content + body_content + "</body>\n</html>\n"
 
 
 def _html_decision_page(
@@ -5067,6 +5096,7 @@ def _html_decision_page(
     ctx: _DecisionContext | None,
     error: str | None,
     ticker_note: str | None = None,
+    is_sub_page: bool = False,
     ticker_note_error: bool = False,
 ) -> str:
     defaults = {
@@ -5130,17 +5160,19 @@ def _html_decision_page(
         </div>
         """
 
-    return f"""<!doctype html>
+    head_content = ""
+    if not is_sub_page:
+        head_content = f"""<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>{_APP_TITLE} - 의사결정 대시보드</title>
-  <style>
-    {_base_css()}
-  </style>
+  <title>Stock Analysis Lab | S&P500 - 의사결정 대시보드</title>
+  <style>{_base_css()}</style>
 </head>
-<body>
+<body>"""
+
+    body_content = f"""
   <div class="wrap">
     {_page_head(_APP_TITLE)}
     <div class="sub">추세, 모멘텀, 상대강도, 리스크, 밸류에이션을 함께 읽는 종합 판단 페이지</div>
@@ -5161,9 +5193,11 @@ def _html_decision_page(
     {reason_html}
     {tables_html}
   </div>
-</body>
-</html>
 """
+
+    if is_sub_page:
+        return body_content
+    return head_content + body_content + "</body>\n</html>\n"
 
 
 def _latest_date_from_csv(path: Path) -> str | None:
@@ -5272,10 +5306,10 @@ def _collect_post_refresh_items(root_dir: Path) -> list[dict[str, object]]:
     return items
 
 
-def _html_refresh_page(*, enable_technical_page: bool = True) -> str:
+def _html_refresh_page(*, enable_technical_page: bool = True, is_sub_page: bool = False) -> str:
     return f"""<!doctype html>
 <html lang="en">
-<head>
+<head> # Removed this section as it's now handled by the main GUI
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>{_APP_TITLE} - 데이터 갱신</title>
@@ -5385,7 +5419,7 @@ def _html_refresh_page(*, enable_technical_page: bool = True) -> str:
 """
 
 
-def _html_refresh_history_page() -> str:
+def _html_refresh_history_page(is_sub_page: bool = False) -> str:
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -5657,7 +5691,7 @@ def launch_stock_forecast_web_gui(
                 return
             if enable_technical_page and path == "/external_select":
                 ticker = str(query.get("ticker", [""])[0]).strip().upper()
-                target = str(query.get("target", ["/page6"])[0]).strip() or "/page6"
+                target = str(query.get("target", ["/decision"])[0]).strip() or "/decision" # Changed default target
                 if target not in {"/page6", "/decision", "/forecast", "/page1"}:
                     target = "/page6"
                 if not ticker:
@@ -5679,7 +5713,7 @@ def launch_stock_forecast_web_gui(
                 return
 
             # 외부 티커 요청 처리 (예: ?ticker=AAPL&intent=run)
-            ticker_arg = query.get("ticker", [None])[0]
+            ticker_arg = query.get("ticker", [None])[0] # This logic needs to be moved to main web_gui
             if ticker_arg and path in {"/", "/index.html", "/forecast", "/page1", "/page6", "/decision"}:
                 clean_t = ticker_arg.strip().upper()
                 decision_entry = path in {"/", "/index.html", "/page6", "/decision"}
@@ -5724,7 +5758,7 @@ def launch_stock_forecast_web_gui(
                 if path in {"/", "/index.html"}:
                     path = "/page6"
 
-            if path in ("/", "/index.html"):
+            if path in ("/", "/index.html"): # This should be handled by the main web_gui
                 self._send_html(
                     _html_financial_page(
                         self.state_fin_form,
@@ -5736,7 +5770,7 @@ def launch_stock_forecast_web_gui(
                     )
                 )
                 return
-            if path in ("/forecast", "/stock-forecast"):
+            if path in ("/forecast", "/stock-forecast"): # This should be handled by the main web_gui
                 self._send_html(
                     _html_page(
                         self.state_form,
@@ -5748,7 +5782,7 @@ def launch_stock_forecast_web_gui(
                     )
                 )
                 return
-            if path in ("/page2", "/financials"):
+            if path in ("/page2", "/financials"): # This should be handled by the main web_gui
                 self._send_html(
                     _html_financial_page(
                         self.state_fin_form,
@@ -5760,7 +5794,7 @@ def launch_stock_forecast_web_gui(
                     )
                 )
                 return
-            if enable_technical_page and path in ("/page3", "/technical"):
+            if enable_technical_page and path in ("/page3", "/technical"): # This should be handled by the main web_gui
                 self._send_html(
                     _html_technical_page(
                         self.state_ta_form,
@@ -5771,7 +5805,7 @@ def launch_stock_forecast_web_gui(
                     )
                 )
                 return
-            if enable_technical_page and path in ("/page4", "/returns"):
+            if enable_technical_page and path in ("/page4", "/returns"): # This should be handled by the main web_gui
                 self._send_html(
                     _html_returns_page(
                         self.state_ret_form,
@@ -5782,7 +5816,7 @@ def launch_stock_forecast_web_gui(
                     )
                 )
                 return
-            if enable_technical_page and path in ("/page5", "/risk"):
+            if enable_technical_page and path in ("/page5", "/risk"): # This should be handled by the main web_gui
                 self._send_html(
                     _html_risk_page(
                         self.state_risk_form,
@@ -5793,7 +5827,7 @@ def launch_stock_forecast_web_gui(
                     )
                 )
                 return
-            if enable_technical_page and path in ("/factor-regime", "/factor", "/page5b"):
+            if enable_technical_page and path in ("/factor-regime", "/factor", "/page5b"): # This should be handled by the main web_gui
                 self._send_html(
                     _html_factor_page(
                         self.state_factor_form,
@@ -5804,7 +5838,7 @@ def launch_stock_forecast_web_gui(
                     )
                 )
                 return
-            if enable_technical_page and path in ("/page6", "/decision"):
+            if enable_technical_page and path in ("/page6", "/decision"): # This should be handled by the main web_gui
                 self._send_html(
                     _html_decision_page(
                         self.state_dec_form,
@@ -5815,10 +5849,10 @@ def launch_stock_forecast_web_gui(
                     )
                 )
                 return
-            if enable_technical_page and path in ("/page7", "/refresh-data"):
+            if enable_technical_page and path in ("/page7", "/refresh-data"): # This should be handled by the main web_gui
                 self._send_html(_html_refresh_page(enable_technical_page=True))
                 return
-            if enable_technical_page and path in ("/page8", "/walk-forward-validation"):
+            if enable_technical_page and path in ("/page8", "/walk-forward-validation"): # This should be handled by the main web_gui
                 self._send_html(
                     _html_walk_forward_page(
                         self.state_wfv_form,
@@ -5829,13 +5863,13 @@ def launch_stock_forecast_web_gui(
                     )
                 )
                 return
-            if enable_technical_page and path == "/refresh_status":
+            if enable_technical_page and path == "/refresh_status": # This should be handled by the main web_gui
                 self._send_json(self._refresh_status_payload())
                 return
-            if enable_technical_page and path == "/refresh_history_data":
+            if enable_technical_page and path == "/refresh_history_data": # This should be handled by the main web_gui
                 self._send_json(self._refresh_history_payload())
                 return
-            if enable_technical_page and path == "/refresh_history_window":
+            if enable_technical_page and path == "/refresh_history_window": # This should be handled by the main web_gui
                 self._send_html(_html_refresh_history_page())
                 return
 
@@ -5843,33 +5877,33 @@ def launch_stock_forecast_web_gui(
             self.end_headers()
             self.wfile.write(b"Not Found")
 
-        def do_POST(self) -> None:  # noqa: N802
+        def do_POST(self) -> None:  # noqa: N802 # This should be handled by the main web_gui
             path = urlparse(self.path).path
-            if path == "/run":
+            if path == "/run": # This should be handled by the main web_gui
                 self._handle_forecast_run()
                 return
-            if path == "/run_financial":
+            if path == "/run_financial": # This should be handled by the main web_gui
                 self._handle_financial_run()
                 return
-            if enable_technical_page and path == "/run_technical":
+            if enable_technical_page and path == "/run_technical": # This should be handled by the main web_gui
                 self._handle_technical_run()
                 return
-            if enable_technical_page and path == "/run_returns":
+            if enable_technical_page and path == "/run_returns": # This should be handled by the main web_gui
                 self._handle_returns_run()
                 return
-            if enable_technical_page and path == "/run_risk":
+            if enable_technical_page and path == "/run_risk": # This should be handled by the main web_gui
                 self._handle_risk_run()
                 return
-            if enable_technical_page and path == "/run_factor":
+            if enable_technical_page and path == "/run_factor": # This should be handled by the main web_gui
                 self._handle_factor_run()
                 return
-            if enable_technical_page and path == "/run_decision":
+            if enable_technical_page and path == "/run_decision": # This should be handled by the main web_gui
                 self._handle_decision_run()
                 return
-            if enable_technical_page and path == "/run_refresh":
+            if enable_technical_page and path == "/run_refresh": # This should be handled by the main web_gui
                 self._handle_refresh_run()
                 return
-            if enable_technical_page and path == "/run_walk_forward":
+            if enable_technical_page and path == "/run_walk_forward": # This should be handled by the main web_gui
                 self._handle_walk_forward_run()
                 return
 
@@ -6862,24 +6896,15 @@ def launch_stock_forecast_web_gui(
             return
     server = ThreadingHTTPServer((host, port), Handler)
     print(f"{_APP_TITLE} listening on http://{host}:{port}")
-    print("If running remotely, open the forwarded port URL in your browser.")
-    if open_browser:
-        print(f"Opening browser at http://{_browser_target_host(host)}:{port}")
-        _schedule_browser_open(host=host, port=port)
-    server.serve_forever()
+    # Removed server.serve_forever() and browser opening logic as this is now a module
 
+# Expose functions and dataclasses for external use
+__all__ = [
+    "_RunContext", "_FinancialContext", "_ReturnsContext", "_RiskContext", "_DecisionContext", "_FactorContext", "_WalkForwardContext",
+    "_run_once", "_run_financial_once", "_run_returns_once", "_run_risk_once", "_run_factor_once", "_run_decision_once", "_run_walk_forward_validation_once",
+    "_html_page", "_html_financial_page", "_html_technical_page", "_html_returns_page", "_html_risk_page", "_html_factor_page", "_html_decision_page", "_html_walk_forward_page",
+    "_resolve_ticker_input",
+    "ta_web_gui", # Expose technical_analysis module
+]
 
-def launch_web_gui(host: str = "localhost", port: int = 8512, open_browser: bool = False) -> None:
-    launch_stock_forecast_web_gui(
-        host=host,
-        port=port,
-        enable_technical_page=True,
-        open_browser=open_browser,
-    )
-
-
-run_web_gui = launch_web_gui
-
-
-if __name__ == "__main__":
-    launch_web_gui()
+# No __main__ block here, as it's not a standalone executable anymore

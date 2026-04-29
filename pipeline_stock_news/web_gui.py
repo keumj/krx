@@ -73,7 +73,7 @@ def _default_form() -> dict[str, str]:
     }
 
 
-def _nav(active: str) -> str:
+def _nav(active: str, is_sub_page: bool = False) -> str:
     items = [
         ("overview", "/overview", "뉴스 개요"),
         ("event", "/event-study", "이벤트 스터디"),
@@ -135,7 +135,7 @@ def _nav(active: str) -> str:
     )
 
 
-def _base_css() -> str:
+def _base_css(is_sub_page: bool = False) -> str:
     return """
     :root {
       --bg: #f3f5f7;
@@ -218,7 +218,7 @@ def _base_css() -> str:
     """
 
 
-def _page_head(title: str) -> str:
+def _page_head(title: str, is_sub_page: bool = False) -> str:
     return (
         '<div class="page-head">'
         f"<h1>{html.escape(title)}</h1>"
@@ -667,6 +667,7 @@ def _layout_page(
     action: str,
     button_label: str,
     content_html: str,
+    is_sub_page: bool = False,
 ) -> str:
     notices = ""
     if ctx.error:
@@ -675,8 +676,11 @@ def _layout_page(
         css = "err" if ctx.ticker_note_error else "ok"
         notices += f'<div class="notice {css}"><pre>{html.escape(ctx.ticker_note)}</pre></div>'
     elif _has_sections(ctx.dashboard, active):
-        notices += '<div class="notice ok">현재 페이지 기준으로 최신 분석 결과를 불러왔습니다.</div>'
-    return f"""<!doctype html>
+        notices += '<div class="notice ok">현재 페이지 기준으로 최신 분석 결과를 불러왔습니다.</div>' # This notice should be handled by the main GUI
+    
+    head_content = ""
+    if not is_sub_page:
+        head_content = f"""<!doctype html>
 <html lang="ko">
 <head>
   <meta charset="utf-8" />
@@ -684,9 +688,10 @@ def _layout_page(
   <title>Stock News Lab</title>
   <style>{_base_css()}</style>
 </head>
-<body>
+<body>"""
+    
+    body_content = f"""
   <div class="wrap">
-    <h1 style="margin:0 0 12px;">Stock News Lab | S&P500</h1>
     {_nav(active)}
     {_page_head(title)}
     <div class="sub">{html.escape(subtitle)}</div>
@@ -694,13 +699,14 @@ def _layout_page(
     {notices}
     {_summary_metrics(ctx)}
     {content_html}
-  </div>
-</body>
-</html>
-"""
+  </div>"""
+
+    if is_sub_page:
+        return body_content
+    return head_content + body_content + "</body>\n</html>\n"
 
 
-def _overview_page(ctx: _PageContext) -> str:
+def _overview_page(ctx: _PageContext, is_sub_page: bool = False) -> str:
     dashboard = ctx.dashboard
     if not _has_sections(dashboard, "overview"):
         body = '<div class="card"><p class="hint">아직 결과가 없습니다. 상단에서 한 번 실행해 주세요.</p></div>'
@@ -729,10 +735,11 @@ def _overview_page(ctx: _PageContext) -> str:
         action="/run_overview",
         button_label="뉴스 개요 갱신",
         content_html=body,
+        is_sub_page=is_sub_page,
     )
 
 
-def _html_event_page(ctx: _PageContext) -> str:
+def _html_event_page(ctx: _PageContext, is_sub_page: bool = False) -> str:
     dashboard = ctx.dashboard
     if not _has_sections(dashboard, "event"):
         body = '<div class="card"><p class="hint">이벤트 스터디 결과가 없습니다.</p></div>'
@@ -761,10 +768,11 @@ def _html_event_page(ctx: _PageContext) -> str:
         action="/run_event_study",
         button_label="이벤트 스터디 실행",
         content_html=body,
+        is_sub_page=is_sub_page,
     )
 
 
-def _html_spillover_page(ctx: _PageContext) -> str:
+def _html_spillover_page(ctx: _PageContext, is_sub_page: bool = False) -> str:
     dashboard = ctx.dashboard
     if not _has_sections(dashboard, "spillover"):
         body = '<div class="card"><p class="hint">섹터 전이 결과가 없습니다.</p></div>'
@@ -793,10 +801,11 @@ def _html_spillover_page(ctx: _PageContext) -> str:
         action="/run_sector_spillover",
         button_label="섹터 전이 분석 실행",
         content_html=body,
+        is_sub_page=is_sub_page,
     )
 
 
-def _html_divergence_page(ctx: _PageContext) -> str:
+def _html_divergence_page(ctx: _PageContext, is_sub_page: bool = False) -> str:
     dashboard = ctx.dashboard
     if not _has_sections(dashboard, "divergence"):
         body = '<div class="card"><p class="hint">뉴스-프라이스 다이버전스 결과가 없습니다.</p></div>'
@@ -822,10 +831,11 @@ def _html_divergence_page(ctx: _PageContext) -> str:
         action="/run_divergence",
         button_label="괴리 탐지 실행",
         content_html=body,
+        is_sub_page=is_sub_page,
     )
 
 
-def _html_expectation_page(ctx: _PageContext) -> str:
+def _html_expectation_page(ctx: _PageContext, is_sub_page: bool = False) -> str:
     dashboard = ctx.dashboard
     if not _has_sections(dashboard, "expectation"):
         body = '<div class="card"><p class="hint">기대 리셋 결과가 없습니다.</p></div>'
@@ -851,10 +861,11 @@ def _html_expectation_page(ctx: _PageContext) -> str:
         action="/run_expectation_reset",
         button_label="기대 리셋 탐지 실행",
         content_html=body,
+        is_sub_page=is_sub_page,
     )
 
 
-def _html_volatility_page(ctx: _PageContext) -> str:
+def _html_volatility_page(ctx: _PageContext, is_sub_page: bool = False) -> str:
     dashboard = ctx.dashboard
     if not _has_sections(dashboard, "volatility"):
         body = '<div class="card"><p class="hint">변동성 레짐 결과가 없습니다.</p></div>'
@@ -883,10 +894,11 @@ def _html_volatility_page(ctx: _PageContext) -> str:
         action="/run_volatility_regime",
         button_label="변동성 레짐 실행",
         content_html=body,
+        is_sub_page=is_sub_page,
     )
 
 
-def _html_topics_page(ctx: _PageContext) -> str:
+def _html_topics_page(ctx: _PageContext, is_sub_page: bool = False) -> str:
     dashboard = ctx.dashboard
     if not _has_sections(dashboard, "topics"):
         body = '<div class="card"><p class="hint">토픽 모델 결과가 없습니다.</p></div>'
@@ -913,6 +925,7 @@ def _html_topics_page(ctx: _PageContext) -> str:
         action="/run_topic_modeling",
         button_label="토픽 모델 실행",
         content_html=body,
+        is_sub_page=is_sub_page,
     )
 
 
@@ -986,7 +999,7 @@ def _collect_post_refresh_items(root_dir: Path) -> list[dict[str, object]]:
     ]
 
 
-def _html_refresh_page() -> str:
+def _html_refresh_page(is_sub_page: bool = False) -> str:
     return f"""<!doctype html>
 <html lang="ko">
 <head>
@@ -1098,7 +1111,7 @@ def _html_refresh_page() -> str:
 """
 
 
-def _html_refresh_history_page() -> str:
+def _html_refresh_history_page(is_sub_page: bool = False) -> str:
     return f"""<!doctype html>
 <html lang="ko">
 <head>
@@ -1220,10 +1233,10 @@ def _html_refresh_history_page() -> str:
 """
 def _build_dashboard_from_form(form: dict[str, str], page_key: str) -> StockNewsDashboard:
     ticker = form.get("ticker", "").strip().upper() or None
-    return build_stock_news_dashboard(
+    return build_stock_news_dashboard( # This function needs to be exposed
         event_keywords=form.get("event_keywords", DEFAULT_EVENT_KEYWORDS),
         ticker=ticker,
-        lookback_days=max(int(form.get("lookback_days", DEFAULT_LOOKBACK_DAYS) or DEFAULT_LOOKBACK_DAYS), 1),
+        lookback_days=max(int(form.get("lookback_days", str(DEFAULT_LOOKBACK_DAYS)) or str(DEFAULT_LOOKBACK_DAYS)), 1),
         horizon_days=max(int(form.get("horizon_days", DEFAULT_EVENT_HORIZON_DAYS) or DEFAULT_EVENT_HORIZON_DAYS), 1),
         divergence_top_n=max(int(form.get("divergence_top_n", DEFAULT_DIVERGENCE_TOP_N) or DEFAULT_DIVERGENCE_TOP_N), 1),
         topic_count=max(int(form.get("topic_count", DEFAULT_TOPIC_COUNT) or DEFAULT_TOPIC_COUNT), 2),
@@ -1231,410 +1244,18 @@ def _build_dashboard_from_form(form: dict[str, str], page_key: str) -> StockNews
     )
 
 
-def launch_web_gui(host: str = "localhost", port: int = 8514, open_browser: bool = False) -> None:
-    class Handler(BaseHTTPRequestHandler):
-        state_form: dict[str, str] = _default_form()
-        state_page_forms: dict[str, dict[str, str]] = {}
-        state_page_dashboards: dict[str, StockNewsDashboard] = {}
-        state_page_errors: dict[str, str | None] = {}
-        state_page_ticker_notes: dict[str, str | None] = {}
-        state_page_ticker_note_errors: dict[str, bool] = {}
-        refresh_lock = threading.Lock()
-        state_refresh_running: bool = False
-        state_refresh_status: str = "idle"
-        state_refresh_run_id: int = 0
-        state_refresh_started_at: str | None = None
-        state_refresh_finished_at: str | None = None
-        state_refresh_error: str | None = None
-        state_refresh_logs: list[str] = []
-        state_refresh_live_items: list[dict[str, object]] = []
-        state_refresh_history: list[dict[str, object]] = []
-        state_external_command_id: int = 0
-        state_external_ticker: str = ""
-        state_external_navigate_url: str = ""
-        state_external_updated_at: str | None = None
-
-        @classmethod
-        def _page_context(cls, page_key: str) -> _PageContext:
-            return _PageContext(
-                dashboard=cls.state_page_dashboards.get(page_key),
-                form=dict(cls.state_page_forms.get(page_key, cls.state_form)),
-                error=cls.state_page_errors.get(page_key),
-                ticker_note=cls.state_page_ticker_notes.get(page_key),
-                ticker_note_error=cls.state_page_ticker_note_errors.get(page_key, False),
-            )
-
-        @classmethod
-        def _store_page_form(cls, page_key: str, form: dict[str, str]) -> None:
-            copied = dict(form)
-            cls.state_form = copied
-            cls.state_page_forms[page_key] = copied
-
-        @classmethod
-        def _store_page_result(cls, page_key: str, form: dict[str, str], dashboard: StockNewsDashboard) -> None:
-            cls._store_page_form(page_key, form)
-            cls.state_page_dashboards[page_key] = dashboard
-            cls.state_page_errors[page_key] = None
-            cls.state_page_ticker_notes[page_key] = None
-            cls.state_page_ticker_note_errors[page_key] = False
-
-        @classmethod
-        def _store_page_note(
-            cls,
-            page_key: str,
-            form: dict[str, str],
-            ticker_note: str | None,
-            ticker_note_error: bool,
-        ) -> None:
-            cls._store_page_form(page_key, form)
-            cls.state_page_errors[page_key] = None
-            cls.state_page_ticker_notes[page_key] = ticker_note
-            cls.state_page_ticker_note_errors[page_key] = ticker_note_error
-
-        @classmethod
-        def _store_page_error(cls, page_key: str, form: dict[str, str], error_message: str) -> None:
-            cls._store_page_form(page_key, form)
-            cls.state_page_errors[page_key] = error_message
-            cls.state_page_ticker_notes[page_key] = None
-            cls.state_page_ticker_note_errors[page_key] = False
-
-        def do_GET(self) -> None:  # noqa: N802
-            parsed_url = urlparse(self.path)
-            path = parsed_url.path
-            query = parse_qs(parsed_url.query)
-            page_key = _page_key_from_path(path)
-            if path == "/external_command_state":
-                self._send_json(
-                    {
-                        "ok": True,
-                        "command_id": self.state_external_command_id,
-                        "ticker": self.state_external_ticker,
-                        "navigate_url": self.state_external_navigate_url,
-                        "updated_at": self.state_external_updated_at,
-                    }
-                )
-                return
-            if path == "/external_select":
-                ticker = str(query.get("ticker", [""])[0]).strip().upper()
-                target = str(query.get("target", ["/overview"])[0]).strip() or "/overview"
-                if target not in {"/overview", "/event-study", "/divergence", "/topic-modeling"}:
-                    target = "/overview"
-                if not ticker:
-                    self._send_json({"ok": False, "error": "ticker is required"}, status=400)
-                    return
-                self.__class__.state_external_command_id += 1
-                self.__class__.state_external_ticker = ticker
-                self.__class__.state_external_navigate_url = f"{target}?ticker={ticker}&intent=run"
-                self.__class__.state_external_updated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                self._send_json(
-                    {
-                        "ok": True,
-                        "command_id": self.state_external_command_id,
-                        "ticker": self.state_external_ticker,
-                        "navigate_url": self.state_external_navigate_url,
-                        "updated_at": self.state_external_updated_at,
-                    }
-                )
-                return
-            ticker_arg = query.get("ticker", [None])[0]
-            if ticker_arg and path in {
-                "/",
-                "/index.html",
-                "/overview",
-                "/event-study",
-                "/sector-spillover",
-                "/divergence",
-                "/expectation-reset",
-                "/volatility-regime",
-                "/topic-modeling",
-            }:
-                clean_ticker = str(ticker_arg).strip().upper()
-                base_form = dict(self.__class__.state_page_forms.get(page_key, self.state_form))
-                page_form = {
-                    **base_form,
-                    "ticker": clean_ticker,
-                }
-                self.__class__._store_page_form(page_key, page_form)
-                if query.get("intent", [""])[0].strip().lower() == "run":
-                    try:
-                        dashboard = _build_dashboard_from_form(page_form, page_key)
-                        self.__class__._store_page_result(page_key, page_form, dashboard)
-                    except Exception as exc:  # pragma: no cover
-                        self.__class__._store_page_error(
-                            page_key,
-                            page_form,
-                            f"{type(exc).__name__}: {exc}\n\n{traceback.format_exc(limit=2)}",
-                        )
-            ctx = self.__class__._page_context(page_key)
-            if path in ("/", "/index.html", "/overview"):
-                self._send_html(_overview_page(ctx))
-                return
-            if path == "/event-study":
-                self._send_html(_html_event_page(ctx))
-                return
-            if path == "/sector-spillover":
-                self._send_html(_html_spillover_page(ctx))
-                return
-            if path == "/divergence":
-                self._send_html(_html_divergence_page(ctx))
-                return
-            if path == "/expectation-reset":
-                self._send_html(_html_expectation_page(ctx))
-                return
-            if path == "/volatility-regime":
-                self._send_html(_html_volatility_page(ctx))
-                return
-            if path == "/topic-modeling":
-                self._send_html(_html_topics_page(ctx))
-                return
-            if path == "/refresh-data":
-                self._send_html(_html_refresh_page())
-                return
-            if path == "/refresh-history":
-                self._send_html(_html_refresh_history_page())
-                return
-            if path == "/refresh_status":
-                self._send_json(self._refresh_status_payload())
-                return
-            if path == "/refresh_history_data":
-                self._send_json(self._refresh_history_payload())
-                return
-            self.send_response(404)
-            self.end_headers()
-            self.wfile.write(b"Not Found")
-
-        def do_POST(self) -> None:  # noqa: N802
-            path = urlparse(self.path).path
-            if path == "/run_overview":
-                self._handle_run(_overview_page, "overview")
-                return
-            if path == "/run_event_study":
-                self._handle_run(_html_event_page, "event")
-                return
-            if path == "/run_sector_spillover":
-                self._handle_run(_html_spillover_page, "spillover")
-                return
-            if path == "/run_divergence":
-                self._handle_run(_html_divergence_page, "divergence")
-                return
-            if path == "/run_expectation_reset":
-                self._handle_run(_html_expectation_page, "expectation")
-                return
-            if path == "/run_volatility_regime":
-                self._handle_run(_html_volatility_page, "volatility")
-                return
-            if path == "/run_topic_modeling":
-                self._handle_run(_html_topics_page, "topics")
-                return
-            if path == "/run_refresh":
-                self._handle_refresh_run()
-                return
-            self.send_response(404)
-            self.end_headers()
-            self.wfile.write(b"Not Found")
-
-        def _handle_run(self, render_page, page_key: str) -> None:
-            try:
-                length = int(self.headers.get("Content-Length", "0") or "0")
-                form = _parse_form(self.rfile.read(length))
-                self.__class__._store_page_form(page_key, form)
-                intent = str(form.get("intent", "run")).strip().lower()
-                if intent == "resolve_ticker":
-                    resolved_ticker, ticker_note, ticker_note_error = _resolve_ticker_query(form.get("ticker", ""))
-                    page_form = dict(form)
-                    if resolved_ticker:
-                        page_form = {**form, "ticker": resolved_ticker}
-                    self.__class__._store_page_note(page_key, page_form, ticker_note, ticker_note_error)
-                else:
-                    dashboard = _build_dashboard_from_form(form, page_key)
-                    self.__class__._store_page_result(page_key, form, dashboard)
-            except Exception as exc:  # pragma: no cover
-                current_form = dict(self.__class__.state_page_forms.get(page_key, self.state_form))
-                self.__class__._store_page_error(
-                    page_key,
-                    current_form,
-                    f"{type(exc).__name__}: {exc}\n\n{traceback.format_exc(limit=2)}",
-                )
-            self._send_html(render_page(self.__class__._page_context(page_key)))
-
-        @classmethod
-        def _append_refresh_log(cls, message: str) -> None:
-            stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            line = f"[{stamp}] {message}"
-            with cls.refresh_lock:
-                cls.state_refresh_logs.append(line)
-                if len(cls.state_refresh_logs) > 600:
-                    cls.state_refresh_logs = cls.state_refresh_logs[-600:]
-
-        @classmethod
-        def _refresh_status_payload(cls) -> dict[str, object]:
-            root_dir = _project_root_dir()
-            sqlite_path = root_dir / "data" / "sp500_shared_db" / "sp500_shared_prices.sqlite"
-            latest_date, count = _news_sqlite_snapshot(sqlite_path)
-            latest_summary = f"뉴스 DB 최신일: {latest_date or '-'} / 총 {count:,d}건"
-            with cls.refresh_lock:
-                return {
-                    "status": cls.state_refresh_status,
-                    "run_id": cls.state_refresh_run_id,
-                    "running": cls.state_refresh_running,
-                    "started_at": cls.state_refresh_started_at,
-                    "finished_at": cls.state_refresh_finished_at,
-                    "error": cls.state_refresh_error,
-                    "log_count": len(cls.state_refresh_logs),
-                    "logs": list(cls.state_refresh_logs[-220:]),
-                    "updated_items": [dict(item) for item in cls.state_refresh_live_items],
-                    "latest_summary": latest_summary,
-                }
-
-        @classmethod
-        def _refresh_history_payload(cls) -> dict[str, object]:
-            with cls.refresh_lock:
-                runs: list[dict[str, object]] = []
-                for row in cls.state_refresh_history[:120]:
-                    copied = dict(row)
-                    copied["updated_items"] = [dict(item) for item in row.get("updated_items", [])]  # type: ignore[arg-type]
-                    runs.append(copied)
-            return {
-                "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "runs": runs,
-            }
-
-        @classmethod
-        def _start_refresh_job(cls) -> tuple[bool, str]:
-            with cls.refresh_lock:
-                if cls.state_refresh_running:
-                    return False, "A refresh job is already running."
-                cls.state_refresh_run_id += 1
-                run_id = cls.state_refresh_run_id
-                cls.state_refresh_running = True
-                cls.state_refresh_status = "running"
-                cls.state_refresh_started_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                cls.state_refresh_finished_at = None
-                cls.state_refresh_error = None
-                cls.state_refresh_logs = []
-                cls.state_refresh_live_items = []
-            thread = threading.Thread(target=cls._run_refresh_job, args=(run_id,), daemon=True)
-            thread.start()
-            cls._append_refresh_log(f"Run {run_id} started.")
-            return True, f"Run {run_id} started."
-
-        @classmethod
-        def _run_refresh_job(cls, run_id: int) -> None:
-            status = "success"
-            error_message: str | None = None
-            updated_items: list[dict[str, object]] = []
-            news_rows_added = 0
-            root_dir = _project_root_dir()
-            refresh_cmd, refresh_label = _refresh_subprocess_command(root_dir)
-            sqlite_path = root_dir / "data" / "sp500_shared_db" / "sp500_shared_prices.sqlite"
-            old_latest_date, _ = _news_sqlite_snapshot(sqlite_path)
-            new_latest_date = old_latest_date
-
-            if not refresh_cmd:
-                status = "error"
-                error_message = f"FileNotFoundError: {refresh_label}"
-                cls._append_refresh_log(f"[error] {error_message}")
-            else:
-                cls._append_refresh_log(f"Executing refresh: {refresh_label}")
-                exit_code = 1
-                try:
-                    proc = subprocess.Popen(
-                        refresh_cmd,
-                        cwd=str(root_dir),
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.STDOUT,
-                        text=True,
-                        encoding="utf-8",
-                        errors="replace",
-                        bufsize=1,
-                    )
-                    if proc.stdout is not None:
-                        for line in proc.stdout:
-                            stripped = line.rstrip("\r\n")
-                            if not stripped:
-                                continue
-                            cls._append_refresh_log(stripped)
-                            m_insert = re.search(r"inserted_rows=(\d+)", stripped)
-                            if m_insert:
-                                news_rows_added = int(m_insert.group(1))
-                    exit_code = int(proc.wait())
-                except Exception as exc:
-                    status = "error"
-                    error_message = f"{type(exc).__name__}: {exc}"
-                    cls._append_refresh_log(f"[error] {error_message}")
-                else:
-                    if exit_code != 0:
-                        status = "error"
-                        error_message = f"{refresh_label} exited with code {exit_code}"
-                        cls._append_refresh_log(f"[error] {error_message}")
-                    else:
-                        cls._append_refresh_log("Refresh finished successfully.")
-
-            new_latest_date, _ = _news_sqlite_snapshot(sqlite_path)
-            updated_items = _collect_post_refresh_items(root_dir)
-            finished_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            history_row = {
-                "run_id": run_id,
-                "status": status,
-                "started_at": cls.state_refresh_started_at,
-                "finished_at": finished_at,
-                "old_latest_date": old_latest_date,
-                "new_latest_date": new_latest_date,
-                "news_rows_added": news_rows_added,
-                "error_message": error_message,
-                "updated_items": updated_items,
-            }
-
-            with cls.refresh_lock:
-                cls.state_refresh_running = False
-                cls.state_refresh_status = status
-                cls.state_refresh_finished_at = finished_at
-                cls.state_refresh_error = error_message
-                cls.state_refresh_live_items = [dict(item) for item in updated_items]
-                cls.state_refresh_history.insert(0, history_row)
-                if len(cls.state_refresh_history) > 300:
-                    cls.state_refresh_history = cls.state_refresh_history[:300]
-
-            cls._append_refresh_log(f"Run {run_id} finished with status={status}.")
-
-        def _handle_refresh_run(self) -> None:
-            started, message = self.__class__._start_refresh_job()
-            if not started:
-                self.__class__._append_refresh_log(message)
-            self._send_html(_html_refresh_page())
-
-        def _send_html(self, body: str) -> None:
-            payload = body.encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Length", str(len(payload)))
-            self.end_headers()
-            self.wfile.write(payload)
-
-        def _send_json(self, payload_obj: dict[str, object], status: int = 200) -> None:
-            payload = json.dumps(payload_obj, ensure_ascii=False).encode("utf-8")
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("Content-Length", str(len(payload)))
-            self.end_headers()
-            self.wfile.write(payload)
-
-        def log_message(self, format: str, *args: object) -> None:  # noqa: A003
-            return
-
-    server = ThreadingHTTPServer((host, int(port)), Handler)
-    url = f"http://{host}:{port}"
-    print(f"Stock News Lab running at {url}", flush=True)
-    if open_browser:
-        try:
-            webbrowser.open(url)
-        except Exception:
-            pass
-    try:
-        server.serve_forever()
-    finally:
-        server.server_close()
-
-
-run_web_gui = launch_web_gui
+# Expose functions and dataclasses for external use
+__all__ = [
+    "_PageContext",
+    "PAGE_TO_SECTIONS",
+    "_default_form",
+    "_build_dashboard_from_form",
+    "_resolve_ticker_query",
+    "_overview_page",
+    "_html_event_page",
+    "_html_spillover_page",
+    "_html_divergence_page",
+    "_html_expectation_page",
+    "_html_volatility_page",
+    "_html_topics_page",
+]

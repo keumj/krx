@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from .financial_market_prices_sql import (
+from .shared_sp500_prices_sql import (
     TREASURY_DATASET,
     load_financial_market_frame,
     load_financial_market_series,
