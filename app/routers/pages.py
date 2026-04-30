@@ -13,31 +13,31 @@ def index() -> HTMLResponse:
     body = """
     <div class="service-stack">
       <div class="service-card">
-        <h1>Portfolio-first Single Port Service</h1>
-        <p class="service-muted">포트폴리오를 기본 앱으로 두고, 종목 분석과 뉴스 분석을 하위 모듈로 붙인 웹서비스입니다.</p>
+        <h1>Keumj 포트폴리오 분석 서비스</h1>
+        <p class="service-muted">포트폴리오를 중심으로 종목 분석, 뉴스 분석, 데이터 갱신 기능을 한 포트에서 실행합니다.</p>
       </div>
       <div class="service-grid">
         <a class="service-card" href="/portfolio/overview?intent=run">
-          <h3>Portfolio</h3>
-          <p>보유 종목, 성과, 리스크, 최적화 분석을 실행합니다.</p>
+          <h3>포트폴리오</h3>
+          <p>보유 종목, 성과, 위험, 최적화 분석을 실행합니다.</p>
         </a>
         <a class="service-card" href="/stock/forecast">
-          <h3>Stock</h3>
+          <h3>종목 분석</h3>
           <p>개별 종목 예측, 재무, 기술적 분석, 의사결정 화면으로 이동합니다.</p>
         </a>
         <a class="service-card" href="/stock-news/overview">
-          <h3>Stock News</h3>
+          <h3>뉴스 분석</h3>
           <p>뉴스 기반 이벤트, 섹터 전이, 토픽, 가격 반응 분석을 실행합니다.</p>
         </a>
       </div>
     </div>
     """
-    return HTMLResponse(shell("Keumjm Portfolio Lab", body))
+    return HTMLResponse(shell("Keumj Portfolio Lab", body))
 
 
 @router.get("/healthz")
 def healthz() -> dict[str, object]:
-    return {"ok": True, "service": "keumjm-single-port"}
+    return {"ok": True, "service": "keumj-single-port"}
 
 
 @router.get("/external_command_state")

@@ -16,6 +16,10 @@ def portfolio_page(
     lookback_days: int = portfolio_service.DEFAULT_LOOKBACK_DAYS,
     start_date: str | None = None,
     end_date: str | None = None,
+    universe_size: int = portfolio_service.DEFAULT_OPTIMIZATION_UNIVERSE_SIZE,
+    sector_cap_pct: float = portfolio_service.DEFAULT_SECTOR_CAP_PCT,
+    max_position_pct: float = portfolio_service.DEFAULT_MAX_POSITION_PCT,
+    cash_buffer_pct: float = portfolio_service.DEFAULT_CASH_BUFFER_PCT,
 ) -> HTMLResponse:
     return HTMLResponse(
         portfolio_service.render_page(
@@ -24,6 +28,10 @@ def portfolio_page(
             lookback_days=lookback_days,
             start_date=start_date,
             end_date=end_date,
+            universe_size=universe_size,
+            sector_cap_pct=sector_cap_pct,
+            max_position_pct=max_position_pct,
+            cash_buffer_pct=cash_buffer_pct,
         )
     )
 
@@ -35,6 +43,10 @@ def portfolio_legacy_page(
     lookback_days: int = portfolio_service.DEFAULT_LOOKBACK_DAYS,
     start_date: str | None = None,
     end_date: str | None = None,
+    universe_size: int = portfolio_service.DEFAULT_OPTIMIZATION_UNIVERSE_SIZE,
+    sector_cap_pct: float = portfolio_service.DEFAULT_SECTOR_CAP_PCT,
+    max_position_pct: float = portfolio_service.DEFAULT_MAX_POSITION_PCT,
+    cash_buffer_pct: float = portfolio_service.DEFAULT_CASH_BUFFER_PCT,
 ) -> HTMLResponse:
     if legacy_page not in {"data-entry", "attribution", "risk", "scoring", "virtual-trade", "optimization"}:
         return HTMLResponse("<h1>Not Found</h1>", status_code=404)
@@ -45,6 +57,10 @@ def portfolio_legacy_page(
             lookback_days=lookback_days,
             start_date=start_date,
             end_date=end_date,
+            universe_size=universe_size,
+            sector_cap_pct=sector_cap_pct,
+            max_position_pct=max_position_pct,
+            cash_buffer_pct=cash_buffer_pct,
         )
     )
 

@@ -10,7 +10,7 @@ from bs4 import BeautifulSoup
 
 from pipeline_stock import web_gui as stock_web
 
-from app.web import rewrite_links
+from app.web import add_start_page_link, rewrite_links
 
 
 STOCK_REWRITES = {
@@ -78,107 +78,118 @@ state = StockState()
 
 
 PAGE_SUBTITLES = {
-    "forecast": "Run price forecast analysis for the selected S&P 500 ticker.",
-    "financials": "Review financial statements, valuation metrics, and provider status.",
-    "technical": "Run moving average, candlestick, RSI, and MACD technical analysis.",
-    "returns": "Compare ticker returns against its sector and the S&P 500 universe.",
-    "risk": "Measure volatility, drawdown, beta, VaR, and relative risk ranks.",
-    "factor-regime": "Decompose ticker movement into market, sector, and residual factors.",
-    "decision": "Combine return, risk, factor, and trend signals into one decision dashboard.",
-    "walk-forward": "Validate forecast quality through repeated historical walk-forward tests.",
+    "forecast": "선택한 S&P 500 종목의 가격 예측을 실행합니다.",
+    "financials": "재무제표, 밸류에이션 지표, 데이터 제공 상태를 확인합니다.",
+    "technical": "이동평균, 캔들, RSI, MACD 기반 기술적 분석을 실행합니다.",
+    "returns": "선택 종목의 수익률을 섹터 및 S&P 500 전체와 비교합니다.",
+    "risk": "변동성, 낙폭, 베타, VaR, 상대 위험 순위를 측정합니다.",
+    "factor-regime": "종목 움직임을 시장, 섹터, 고유 요인으로 분해합니다.",
+    "decision": "수익률, 위험, 팩터, 추세 신호를 종합해 의사결정 점수를 계산합니다.",
+    "walk-forward": "반복 과거 검증으로 예측 품질을 점검합니다.",
 }
 
 PAGE_RUN_LABELS = {
-    "forecast": "Run Forecast",
-    "financials": "Run Financials",
-    "returns": "Run Return Comparison",
-    "risk": "Run Risk Dashboard",
-    "factor-regime": "Run Factor Regime",
-    "decision": "Run Decision Dashboard",
-    "walk-forward": "Run Walk-Forward Validation",
+    "forecast": "예측 실행",
+    "financials": "재무 분석 실행",
+    "returns": "수익률 비교 실행",
+    "risk": "위험 분석 실행",
+    "factor-regime": "팩터/국면 분석 실행",
+    "decision": "의사결정 점수 실행",
+    "walk-forward": "워크포워드 검증 실행",
 }
 
 FIELD_LABELS = {
-    "ticker": "Ticker",
-    "forecast_horizon": "Forecast Horizon",
-    "history_years": "History Years",
-    "start_date": "Start Date",
-    "end_date": "End Date",
-    "output_dir": "Output Folder",
-    "prices_csv_path": "Local Prices CSV",
-    "ca_bundle_path": "CA Bundle Path",
-    "statement_periods": "Statement Periods",
-    "fmp_api_key": "FMP API Key",
-    "wf_min_train_rows": "Min Training Rows",
-    "wf_step_size": "Split Step Size",
-    "wf_max_splits": "Max Splits",
+    "ticker": "티커",
+    "forecast_horizon": "예측 기간",
+    "history_years": "과거 데이터 연수",
+    "start_date": "시작일",
+    "end_date": "종료일",
+    "output_dir": "출력 폴더",
+    "prices_csv_path": "로컬 가격 CSV",
+    "ca_bundle_path": "CA 번들 경로",
+    "statement_periods": "재무제표 기간 수",
+    "fmp_api_key": "FMP API 키",
+    "wf_min_train_rows": "최소 학습 행 수",
+    "wf_step_size": "분할 간격",
+    "wf_max_splits": "최대 분할 수",
 }
 
 CHECKBOX_LABELS = {
-    "use_sample": "Use sample prices (offline)",
-    "auto_save": "Auto-save results",
-    "insecure_ssl": "Temporarily disable SSL verification",
+    "use_sample": "샘플 가격 사용(오프라인)",
+    "auto_save": "결과 자동 저장",
+    "insecure_ssl": "SSL 검증 임시 비활성화",
 }
 
 ACTION_BUTTON_LABELS = {
-    "ma": "Moving Average",
-    "candle": "Candlestick",
+    "ma": "이동평균",
+    "candle": "캔들차트",
     "rsi": "RSI",
     "macd": "MACD",
-    "all": "Run All",
+    "all": "전체 실행",
 }
 
 PAGE_NOTICE = {
-    "forecast": "Enter a ticker and run the forecast. Use sample data if you need an offline check.",
-    "financials": "Enter a ticker and run financial analysis. If yfinance is unavailable, SEC/FMP/shared-data fallbacks are used.",
-    "technical": "Run technical charts from the latest OHLCV data. Sample data is available for offline preview.",
-    "returns": "Compare the selected ticker with its sector and the S&P 500 universe.",
-    "risk": "Run risk analysis for volatility, drawdown, beta, and tail-risk metrics.",
-    "factor-regime": "Run factor and regime analysis to separate market, sector, and ticker-specific movement.",
-    "decision": "Run the decision dashboard after selecting a ticker.",
-    "walk-forward": "Run walk-forward validation. For a short date range, the service widens the training window automatically.",
+    "forecast": "티커를 입력하고 가격 예측을 실행하세요. 오프라인 점검이 필요하면 샘플 데이터를 사용할 수 있습니다.",
+    "financials": "티커를 입력하고 재무 분석을 실행하세요. yfinance가 불안정하면 SEC/FMP/공유 데이터 대체 경로를 사용합니다.",
+    "technical": "최신 OHLCV 데이터로 기술적 차트를 계산합니다. 오프라인 미리보기에는 샘플 데이터를 사용할 수 있습니다.",
+    "returns": "선택 종목을 같은 섹터 및 S&P 500 전체와 비교합니다.",
+    "risk": "변동성, 낙폭, 베타, 꼬리위험 지표를 기반으로 위험을 분석합니다.",
+    "factor-regime": "시장, 섹터, 종목 고유 움직임을 분리해 현재 국면을 해석합니다.",
+    "decision": "티커를 선택한 뒤 의사결정 점수를 계산합니다.",
+    "walk-forward": "워크포워드 검증을 실행합니다. 기간이 짧으면 학습 구간을 자동으로 넓혀 계산합니다.",
 }
 
 PAGE_H3_LABELS = {
-    "forecast": ["Price Forecast", "Model Weights", "Data Source Metadata", "Forecast Summary", "Model Scores", "Direction Scores", "Regime Snapshot", "Feature Importance"],
-    "financials": ["Data Source Metadata", "Provider Status", "Financial Metrics", "Latest Financial Summary", "Income Statement", "Balance Sheet", "Cash Flow Statement"],
-    "technical": ["Data Source Metadata", "Run Summary"],
-    "returns": ["YTD Base 100 Index", "Recent Daily Return Comparison", "Period Return Comparison", "Recent Ticker Daily Returns", "Recent Sector Daily Returns", "Data Source Metadata", "Sector YTD Top 10", "Sector YTD Bottom 10", "S&P 500 YTD Top 10", "S&P 500 YTD Bottom 10"],
-    "risk": ["Risk Commentary", "1Y Drawdown Comparison", "20D Rolling Annualized Volatility", "Volatility and Drawdown Summary", "Recent Shock Check", "Data Source Metadata", "Sector Highest 1Y Volatility", "Sector Lowest 1Y Volatility", "S&P 500 Highest 1Y Volatility", "S&P 500 Lowest 1Y Volatility"],
-    "factor-regime": ["How To Read Factor Regime", "Rolling 60-Day Beta", "Cumulative Residual Return", "Factor Summary", "Interpretation Guide", "Recent Factor Decomposition", "Data Source Metadata"],
-    "decision": ["Final Decision", "Decision Score Breakdown", "Trend and Volatility Context", "Bullish Reasons", "Bearish Reasons", "Watch Items", "Score Table", "Signal Details", "Data Source Metadata"],
-    "walk-forward": ["How To Read Walk-Forward Validation", "Predicted vs Realized Forward Return", "Error and Rolling Hit Rate", "Validation Summary", "Interpretation Guide", "No-Trade Threshold Summary", "Regime Summary", "Data Source Metadata", "Model Diagnostics", "Split Results"],
+    "forecast": ["가격 예측", "모델 가중치", "데이터 출처", "예측 요약", "모델 점수", "방향성 점수", "국면 스냅샷", "특성 중요도"],
+    "financials": ["데이터 출처", "제공자 상태", "재무 지표", "최신 재무 요약", "손익계산서", "재무상태표", "현금흐름표"],
+    "technical": ["데이터 출처", "실행 요약"],
+    "returns": ["YTD 기준 100 지수", "최근 일간 수익률 비교", "기간 수익률 비교", "최근 종목 일간 수익률", "최근 섹터 일간 수익률", "데이터 출처", "섹터 YTD 상위 10", "섹터 YTD 하위 10", "S&P 500 YTD 상위 10", "S&P 500 YTD 하위 10"],
+    "risk": ["위험 해석", "1년 낙폭 비교", "20일 이동 연율화 변동성", "변동성 및 낙폭 요약", "최근 충격 점검", "데이터 출처", "섹터 내 1년 변동성 상위", "섹터 내 1년 변동성 하위", "S&P 500 1년 변동성 상위", "S&P 500 1년 변동성 하위"],
+    "factor-regime": ["팩터/국면 읽는 법", "60일 이동 베타", "누적 잔차 수익률", "팩터 요약", "해석 가이드", "최근 팩터 분해", "데이터 출처"],
+    "decision": ["최종 판단", "의사결정 점수 분해", "추세 및 변동성 맥락", "긍정 요인", "부정 요인", "관찰 항목", "점수표", "신호 상세", "데이터 출처"],
+    "walk-forward": ["워크포워드 검증 읽는 법", "예측 수익률 vs 실현 수익률", "오차 및 이동 적중률", "검증 요약", "해석 가이드", "거래 제외 기준 요약", "국면 요약", "데이터 출처", "모델 진단", "분할 결과"],
 }
 
 PAGE_METRIC_LABELS = {
-    "forecast": ["Ticker", "As Of Date", "Forecast Date", "Forecast Horizon", "Last Close", "Predicted Price", "Expected Return", "Up Probability", "Direction Confidence", "Signal", "Trade Filter", "Ensemble Log Return"],
-    "financials": ["Ticker", "Company", "Currency", "PER (Trailing)", "PER (Forward)", "PBR", "Market Cap", "ROE"],
-    "technical": ["Ticker", "Data Source", "Rows", "Period", "Action", "Lookback Target"],
-    "walk-forward": ["Ticker", "Price Source", "Evaluation Splits", "Forecast Horizon", "Direction Hit Rate", "Classification Hit Rate", "Trade Coverage", "Trade Hit Rate", "MAE", "RMSE", "Skill vs Naive", "Bias", "Return Correlation", "Latest As-Of Date", "Latest Realized Date"],
+    "forecast": ["티커", "기준일", "예측일", "예측 기간", "최근 종가", "예측 가격", "기대 수익률", "상승 확률", "방향 신뢰도", "신호", "거래 필터", "앙상블 로그수익률"],
+    "financials": ["티커", "회사명", "통화", "PER(과거)", "PER(예상)", "PBR", "시가총액", "ROE"],
+    "technical": ["티커", "데이터 출처", "행 수", "기간", "실행 항목", "조회 기준"],
+    "walk-forward": ["티커", "가격 출처", "검증 분할 수", "예측 기간", "방향 적중률", "분류 적중률", "거래 커버리지", "거래 적중률", "MAE", "RMSE", "단순 기준 대비 개선", "편향", "수익률 상관", "최신 기준일", "최신 실현일"],
 }
 
 MOJIBAKE_MARKERS = ("?곗", "?섏", "?쒖", "?덉", "?뚯", "媛", "醫", "理", "由", "蹂", "寃", "遺", "湲", "嫄")
 
 PAGE_TEXT_FALLBACK = {
-    "forecast": "Forecast outputs are calculated from the selected ticker price history and model ensemble.",
-    "financials": "Financial outputs combine available provider data, fallback sources, and derived metrics where needed.",
-    "technical": "Technical outputs summarize price trend, momentum, and chart diagnostics.",
-    "returns": "Return outputs compare the ticker against its sector and the S&P 500 universe.",
-    "risk": "Risk outputs summarize volatility, drawdown, beta, and tail-risk behavior from shared price data.",
-    "factor-regime": "Factor-regime outputs separate market, sector, and ticker-specific movement and summarize the current regime.",
-    "decision": "Decision outputs combine bullish, bearish, risk, and trend signals into a single dashboard view.",
-    "walk-forward": "Walk-forward outputs show repeated historical validation results for forecast quality.",
+    "forecast": "예측 결과는 선택 종목의 가격 이력과 모델 앙상블을 기반으로 계산됩니다.",
+    "financials": "재무 결과는 사용 가능한 제공자 데이터, 대체 데이터, 파생 지표를 함께 반영합니다.",
+    "technical": "기술적 분석 결과는 가격 추세, 모멘텀, 차트 진단을 요약합니다.",
+    "returns": "수익률 결과는 종목을 같은 섹터 및 S&P 500 전체와 비교합니다.",
+    "risk": "위험 결과는 공유 가격 데이터 기반 변동성, 낙폭, 베타, 꼬리위험을 요약합니다.",
+    "factor-regime": "팩터/국면 결과는 시장, 섹터, 종목 고유 움직임을 분리해 현재 환경을 요약합니다.",
+    "decision": "의사결정 결과는 긍정/부정 요인, 위험, 추세 신호를 하나의 대시보드로 종합합니다.",
+    "walk-forward": "워크포워드 결과는 반복 과거 검증으로 예측 품질을 보여줍니다.",
 }
 
 PAGE_TITLES = {
-    "forecast": "Stock Analysis Lab | Forecast",
-    "financials": "Stock Analysis Lab | Financials",
-    "technical": "Stock Analysis Lab | Technical",
-    "returns": "Stock Analysis Lab | Returns",
-    "risk": "Stock Analysis Lab | Risk",
-    "factor-regime": "Stock Analysis Lab | Factor Regime",
-    "decision": "Stock Analysis Lab | Decision",
-    "walk-forward": "Stock Analysis Lab | Walk Forward",
+    "forecast": "종목 분석 | 가격 예측",
+    "financials": "종목 분석 | 재무",
+    "technical": "종목 분석 | 기술적 분석",
+    "returns": "종목 분석 | 수익률",
+    "risk": "종목 분석 | 위험",
+    "factor-regime": "종목 분석 | 팩터/국면",
+    "decision": "종목 분석 | 의사결정",
+    "walk-forward": "종목 분석 | 워크포워드",
+}
+
+STOCK_NAV_LABELS = {
+    "/stock/forecast": "가격 예측",
+    "/stock/financials": "재무",
+    "/stock/technical": "기술적 분석",
+    "/stock/returns": "수익률",
+    "/stock/risk": "위험",
+    "/stock/factor-regime": "팩터/국면",
+    "/stock/decision": "의사결정",
+    "/stock/walk-forward": "워크포워드",
 }
 
 REGIME_FALLBACKS = {
@@ -519,7 +530,12 @@ def _make_stock_text_readable(page: str, html: str) -> str:
     html = _repair_broken_stock_markup(html)
     soup = BeautifulSoup(html, "html.parser")
     if soup.title is not None:
-        soup.title.string = PAGE_TITLES.get(page, "Stock Analysis Lab")
+        soup.title.string = PAGE_TITLES.get(page, "종목 분석")
+
+    for link in soup.find_all("a"):
+        href = link.get("href", "")
+        if href in STOCK_NAV_LABELS:
+            link.string = STOCK_NAV_LABELS[href]
 
     sub = soup.select_one(".sub")
     if sub is not None:
@@ -544,21 +560,21 @@ def _make_stock_text_readable(page: str, html: str) -> str:
         if name == "action" and value in ACTION_BUTTON_LABELS:
             button.string = ACTION_BUTTON_LABELS[value]
         elif value == "resolve_ticker":
-            button.string = "Find Ticker by Company Name"
+            button.string = "회사명으로 티커 찾기"
         elif value == "run" or button.get("type") == "submit":
-            button.string = PAGE_RUN_LABELS.get(page, "Run Analysis")
+            button.string = PAGE_RUN_LABELS.get(page, "분석 실행")
 
     for notice in soup.select(".notice.ok"):
         code = notice.find("code")
         if code is not None and _has_mojibake(notice.get_text(" ", strip=True)):
             code.extract()
             notice.clear()
-            notice.append("Results saved to ")
+            notice.append("결과가 ")
             notice.append(code)
-            notice.append(".")
+            notice.append("에 저장되었습니다.")
         elif notice.find(["pre", "code", "table"]) is None:
             notice.clear()
-            notice.append(PAGE_NOTICE.get(page, "Ready."))
+            notice.append(PAGE_NOTICE.get(page, "준비되었습니다."))
 
     for span, text in zip(soup.select(".metric span"), PAGE_METRIC_LABELS.get(page, []), strict=False):
         span.string = text
@@ -578,7 +594,7 @@ def _make_stock_text_readable(page: str, html: str) -> str:
     for h4 in soup.find_all("h4"):
         text = h4.get_text(" ", strip=True)
         if _has_mojibake(text):
-            h4.string = "Result Table"
+            h4.string = "결과 표"
 
     _replace_bad_commentary(page, soup)
 
@@ -588,10 +604,10 @@ def _make_stock_text_readable(page: str, html: str) -> str:
 def _clean_stock_html(page: str, html: str) -> str:
     html = _repair_broken_stock_markup(html)
     html = rewrite_links(html, STOCK_REWRITES)
-    html = re.sub(r"<title>.*?</title>", f"<title>Stock Analysis Lab | {page}</title>", html, count=1, flags=re.S)
+    html = re.sub(r"<title>.*?</title>", f"<title>{PAGE_TITLES.get(page, '종목 분석')}</title>", html, count=1, flags=re.S)
     html = re.sub(
         r'<div class="page-head">.*?</div>\s*</div>',
-        '<div class="page-head"><h1>Stock Analysis Lab | S&P 500</h1><div class="page-credit">Keumj service</div></div>',
+        '<div class="page-head"><h1>종목 분석 | S&P 500</h1><div class="page-credit">Keumj 서비스</div></div>',
         html,
         count=1,
         flags=re.S,
@@ -603,8 +619,7 @@ def _clean_stock_html(page: str, html: str) -> str:
         count=1,
         flags=re.S,
     )
-    back = '<div class="nav" style="margin-bottom:12px;"><a href="/portfolio/overview?intent=run">Portfolio로 돌아가기</a></div>'
-    html = html.replace('<div class="wrap">', '<div class="wrap">' + back, 1)
+    html = add_start_page_link(html)
     return _make_stock_text_readable(page, html)
 
 
@@ -650,6 +665,14 @@ def _sync_ticker(ticker: str) -> None:
         return
     for form in [state.forecast_form, state.financials_form, state.technical_form, state.returns_form, state.risk_form, state.factor_form, state.decision_form, state.wfv_form]:
         form["ticker"] = ticker
+
+
+def _matching_financials_ctx(ticker: str) -> object | None:
+    fin_ctx = state.financials_ctx
+    if fin_ctx is None:
+        return None
+    fin_ticker = str(getattr(fin_ctx, "ticker", "")).strip().upper()
+    return fin_ctx if fin_ticker == ticker else None
 
 
 def run(action: str, form: dict[str, str]) -> str:
@@ -705,7 +728,12 @@ def run(action: str, form: dict[str, str]) -> str:
                 state.returns_ctx = stock_web._run_returns_once({"ticker": ticker})
             if state.risk_ctx is None or getattr(state.risk_ctx, "ticker", "") != ticker:
                 state.risk_ctx = stock_web._run_risk_once({"ticker": ticker})
-            state.decision_ctx = stock_web._run_decision_once(state.decision_form, returns_ctx=state.returns_ctx, risk_ctx=state.risk_ctx, fin_ctx=None)
+            state.decision_ctx = stock_web._run_decision_once(
+                state.decision_form,
+                returns_ctx=state.returns_ctx,
+                risk_ctx=state.risk_ctx,
+                fin_ctx=_matching_financials_ctx(ticker),
+            )
             state.decision_error = None
             return "decision"
         if action == "walk-forward":

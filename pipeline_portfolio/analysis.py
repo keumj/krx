@@ -1914,7 +1914,18 @@ def build_portfolio_dashboard(
     end_date: str | None = None,
 ) -> PortfolioDashboard:
     lookback = max(int(lookback_days), 21)
-    trades = load_trades(portfolio_db)
+    trades_all = load_trades(portfolio_db)
+    db_max_ts = _get_db_max_date(shared_db)
+    if end_date:
+        req_end = pd.Timestamp(end_date).normalize()
+        end_ts = db_max_ts if req_end >= pd.Timestamp.today().normalize() else req_end
+    else:
+        end_ts = db_max_ts
+
+    trades = trades_all.copy()
+    if not trades.empty and "trade_date" in trades.columns:
+        trade_dates = pd.to_datetime(trades["trade_date"], errors="coerce")
+        trades = trades[trade_dates <= end_ts].copy()
     sector_map, component_source = _sector_map(max_symbols=0)
     positions_raw = _current_positions_from_trades(trades, sector_map=sector_map)
     if positions_raw.empty:
@@ -2132,6 +2143,8 @@ def analyze_virtual_trade(
     portfolio_db: Path | str | None = None,
     shared_db: Path | str | None = None,
     lookback_days: int = DEFAULT_LOOKBACK_DAYS,
+    start_date: str | None = None,
+    end_date: str | None = None,
     forecast_horizon_days: int = DEFAULT_VIRTUAL_FORECAST_HORIZON_DAYS,
 ) -> VirtualTradeResult:
     ticker_clean = str(ticker or "").strip().upper()
@@ -2143,11 +2156,24 @@ def analyze_virtual_trade(
     qty_value = float(quantity)
     if qty_value <= 0:
         raise ValueError("quantity must be positive")
-    before = build_portfolio_dashboard(portfolio_db=portfolio_db, shared_db=shared_db, lookback_days=lookback_days)
+    before = build_portfolio_dashboard(
+        portfolio_db=portfolio_db,
+        shared_db=shared_db,
+        lookback_days=lookback_days,
+        start_date=start_date,
+        end_date=end_date,
+    )
     db_now = _get_db_max_date(shared_db)
     trades = before.trades.copy()
-    end_ts = db_now
-    start_ts = end_ts - pd.Timedelta(days=max(int(lookback_days), 21) * 2)
+    if end_date:
+        req_end = pd.Timestamp(end_date).normalize()
+        end_ts = db_now if req_end >= pd.Timestamp.today().normalize() else req_end
+    else:
+        end_ts = db_now
+    if start_date:
+        start_ts = pd.Timestamp(start_date).normalize()
+    else:
+        start_ts = end_ts - pd.Timedelta(days=max(int(lookback_days), 21) * 2)
     close_history, _, sources = _load_close_history(
         sorted(set(before.positions["ticker"].astype(str).tolist() + [ticker_clean])),
         start_date=start_ts.strftime("%Y-%m-%d"),
@@ -2281,12 +2307,20 @@ def build_portfolio_optimization(
     portfolio_db: Path | str | None = None,
     shared_db: Path | str | None = None,
     lookback_days: int = DEFAULT_LOOKBACK_DAYS,
+    start_date: str | None = None,
+    end_date: str | None = None,
     universe_size: int = DEFAULT_OPTIMIZATION_UNIVERSE_SIZE,
     sector_cap_pct: float = DEFAULT_SECTOR_CAP_PCT,
     max_position_pct: float = DEFAULT_MAX_POSITION_PCT,
     cash_buffer_pct: float = DEFAULT_CASH_BUFFER_PCT,
 ) -> OptimizationResult:
-    dashboard = build_portfolio_dashboard(portfolio_db=portfolio_db, shared_db=shared_db, lookback_days=lookback_days)
+    dashboard = build_portfolio_dashboard(
+        portfolio_db=portfolio_db,
+        shared_db=shared_db,
+        lookback_days=lookback_days,
+        start_date=start_date,
+        end_date=end_date,
+    )
     sector_frame, component_source = _load_component_frame(max_symbols=max(int(universe_size), 20))
     sector_lookup = dict(zip(sector_frame["Symbol"], sector_frame["Sector"]))
     current_symbols = set(dashboard.positions["ticker"].astype(str)) if not dashboard.positions.empty and "ticker" in dashboard.positions.columns else set()
@@ -2301,8 +2335,15 @@ def build_portfolio_optimization(
         sector_lookup.update({symbol: full_sector_lookup[symbol] for symbol in missing_symbols if symbol in full_sector_lookup})
     db_now = _get_db_max_date(shared_db)
     universe = sector_frame["Symbol"].astype(str).tolist()
-    end_ts = db_now
-    start_ts = end_ts - pd.Timedelta(days=max(int(lookback_days), 21) * 2)
+    if end_date:
+        req_end = pd.Timestamp(end_date).normalize()
+        end_ts = db_now if req_end >= pd.Timestamp.today().normalize() else req_end
+    else:
+        end_ts = db_now
+    if start_date:
+        start_ts = pd.Timestamp(start_date).normalize()
+    else:
+        start_ts = end_ts - pd.Timedelta(days=max(int(lookback_days), 21) * 2)
     close_history, market_caps, sources = _load_close_history(
         universe,
         start_date=start_ts.strftime("%Y-%m-%d"),

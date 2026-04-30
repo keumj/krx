@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Callable
 
+from bs4 import BeautifulSoup
+
 from pipeline_portfolio import web_gui as portfolio_web
 from pipeline_portfolio.analysis import (
     DEFAULT_CASH_BUFFER_PCT,
@@ -17,12 +19,15 @@ from pipeline_portfolio.analysis import (
     build_portfolio_dashboard,
     build_portfolio_optimization,
     delete_trade,
+    _get_db_max_date,
 )
 
+from app.web import add_start_page_link
 from app.services.dataframe import frame_records
 
 
 DEFAULT_START_DATE = "2025-12-31"
+HISTORICAL_PAGES = {"virtual-trade", "optimization"}
 
 
 @dataclass
@@ -30,6 +35,49 @@ class PortfolioRange:
     lookback_days: int
     start_date: str
     end_date: str
+
+
+def _prepare_portfolio_html(page: str, html: str) -> str:
+    html = add_start_page_link(html)
+    if page not in HISTORICAL_PAGES:
+        return html
+
+    latest_db_date = _latest_db_date()
+    soup = BeautifulSoup(html, "html.parser")
+    for form in soup.find_all("form", attrs={"method": "get"}):
+        action = str(form.get("action", ""))
+        if action not in {"/virtual-trade", "/optimization"}:
+            continue
+        start_field = form.find("input", attrs={"name": "start_date"})
+        if start_field is None or str(start_field.get("type", "")).lower() == "hidden":
+            continue
+        for field_name in ("start_date", "end_date"):
+            field = form.find("input", attrs={"name": field_name})
+            wrapper = field.find_parent("div") if field is not None else None
+            if wrapper is not None:
+                wrapper.decompose()
+        button = form.find("button")
+        if button is not None:
+            button.string = "최신 DB 기준으로 분석 실행"
+        card = form.find_parent("div", class_="card")
+        if card is not None and card.find(attrs={"data-historical-note": "1"}) is None:
+            for old_note in card.find_all("div", class_="small"):
+                old_note.decompose()
+            note = soup.new_tag("div")
+            note["class"] = "small"
+            note["style"] = "margin-top:8px;"
+            note["data-historical-note"] = "1"
+            note.string = f"최신 DB 날짜는 {latest_db_date}이며, 동 일자를 기준으로 분석합니다."
+            card.append(note)
+    return str(soup)
+
+
+def _latest_db_date() -> str:
+    return _get_db_max_date().strftime("%Y-%m-%d")
+
+
+def _latest_db_range(lookback_days: int | None = None) -> PortfolioRange:
+    return resolve_range(DEFAULT_START_DATE, _latest_db_date(), lookback_days)
 
 
 def resolve_range(
@@ -78,10 +126,16 @@ def render_page(
     lookback_days: int = DEFAULT_LOOKBACK_DAYS,
     start_date: str | None = None,
     end_date: str | None = None,
+    universe_size: int = DEFAULT_OPTIMIZATION_UNIVERSE_SIZE,
+    sector_cap_pct: float = DEFAULT_SECTOR_CAP_PCT,
+    max_position_pct: float = DEFAULT_MAX_POSITION_PCT,
+    cash_buffer_pct: float = DEFAULT_CASH_BUFFER_PCT,
     message: str | None = None,
     error: str | None = None,
 ) -> str:
     date_range = resolve_range(start_date, end_date, lookback_days)
+    if page in HISTORICAL_PAGES:
+        date_range = _latest_db_range(lookback_days)
     dashboard = None
     page_error = error
     if run:
@@ -113,19 +167,27 @@ def render_page(
         optimization = None
         if run and page_error is None:
             try:
-                optimization = build_portfolio_optimization(lookback_days=date_range.lookback_days)
+                optimization = build_portfolio_optimization(
+                    lookback_days=date_range.lookback_days,
+                    start_date=date_range.start_date,
+                    end_date=date_range.end_date,
+                    universe_size=universe_size,
+                    sector_cap_pct=sector_cap_pct,
+                    max_position_pct=max_position_pct,
+                    cash_buffer_pct=cash_buffer_pct,
+                )
             except Exception as exc:
                 page_error = f"{type(exc).__name__}: {exc}\n\n{traceback.format_exc(limit=3)}"
         ctx.error = page_error
         ctx.optimization = optimization
         ctx.optimization_params = {
-            "universe_size": DEFAULT_OPTIMIZATION_UNIVERSE_SIZE,
-            "sector_cap_pct": DEFAULT_SECTOR_CAP_PCT,
-            "max_position_pct": DEFAULT_MAX_POSITION_PCT,
-            "cash_buffer_pct": DEFAULT_CASH_BUFFER_PCT,
+            "universe_size": universe_size,
+            "sector_cap_pct": sector_cap_pct,
+            "max_position_pct": max_position_pct,
+            "cash_buffer_pct": cash_buffer_pct,
         }
-        return portfolio_web._optimization_page(ctx)
-    return renderers.get(page, portfolio_web._overview_page)(ctx)
+        return _prepare_portfolio_html(page, portfolio_web._optimization_page(ctx))
+    return _prepare_portfolio_html(page, renderers.get(page, portfolio_web._overview_page)(ctx))
 
 
 def create_trade(form: dict[str, str]) -> None:
@@ -145,13 +207,16 @@ def remove_trade(trade_id: int) -> None:
 
 
 def virtual_trade_payload(form: dict[str, str]) -> dict[str, object]:
+    date_range = _latest_db_range(int(form.get("lookback_days", DEFAULT_LOOKBACK_DAYS) or DEFAULT_LOOKBACK_DAYS))
     result = analyze_virtual_trade(
         ticker=form.get("ticker", ""),
         side=form.get("side", ""),
         quantity=float(form.get("quantity", "0") or 0),
         price=float(form["price"]) if str(form.get("price", "")).strip() else None,
         fees=float(form.get("fees", "0") or 0),
-        lookback_days=int(form.get("lookback_days", DEFAULT_LOOKBACK_DAYS) or DEFAULT_LOOKBACK_DAYS),
+        lookback_days=date_range.lookback_days,
+        start_date=date_range.start_date,
+        end_date=date_range.end_date,
         forecast_horizon_days=int(form.get("forecast_horizon_days", "10") or 10),
     )
     return {
@@ -170,6 +235,7 @@ def render_virtual_trade(form: dict[str, str]) -> str:
         form.get("end_date"),
         int(form.get("lookback_days", DEFAULT_LOOKBACK_DAYS) or DEFAULT_LOOKBACK_DAYS),
     )
+    date_range = _latest_db_range(date_range.lookback_days)
     dashboard = None
     dashboard_error = None
     try:
@@ -187,9 +253,11 @@ def render_virtual_trade(form: dict[str, str]) -> str:
         price=float(form["price"]) if str(form.get("price", "")).strip() else None,
         fees=float(form.get("fees", "0") or 0),
         lookback_days=date_range.lookback_days,
+        start_date=date_range.start_date,
+        end_date=date_range.end_date,
         forecast_horizon_days=int(form.get("forecast_horizon_days", "10") or 10),
     )
-    return portfolio_web._virtual_trade_page(
+    html = portfolio_web._virtual_trade_page(
         portfolio_web._PageContext(
             dashboard=dashboard,
             lookback_days=date_range.lookback_days,
@@ -200,3 +268,4 @@ def render_virtual_trade(form: dict[str, str]) -> str:
             virtual_result=result,
         )
     )
+    return _prepare_portfolio_html("virtual-trade", html)

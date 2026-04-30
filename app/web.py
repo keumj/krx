@@ -10,6 +10,11 @@ def rewrite_links(page: str, replacements: dict[str, str]) -> str:
     return out
 
 
+def add_start_page_link(page: str) -> str:
+    link = '<div class="nav" style="margin-bottom:12px;"><a href="/">시작 페이지로 돌아가기</a></div>'
+    return page.replace('<div class="wrap">', '<div class="wrap">' + link, 1)
+
+
 def shell(title: str, body: str, *, active: str = "portfolio") -> str:
     active_class = {
         "portfolio": "active" if active == "portfolio" else "",
@@ -66,12 +71,12 @@ def shell(title: str, body: str, *, active: str = "portfolio") -> str:
 <body>
   <header class="service-top">
     <div class="service-top-inner">
-      <div class="service-brand">Keumjm Portfolio Lab</div>
+      <div class="service-brand">Keumj Portfolio Lab</div>
       <nav class="service-nav">
-        <a class="{active_class["portfolio"]}" href="/portfolio/overview">Portfolio</a>
-        <a class="{active_class["stock"]}" href="/stock/forecast">Stock</a>
-        <a class="{active_class["news"]}" href="/stock-news/overview">Stock News</a>
-        <a class="{active_class["refresh"]}" href="/refresh">Refresh</a>
+        <a class="{active_class["portfolio"]}" href="/portfolio/overview">포트폴리오</a>
+        <a class="{active_class["stock"]}" href="/stock/forecast">종목 분석</a>
+        <a class="{active_class["news"]}" href="/stock-news/overview">뉴스 분석</a>
+        <a class="{active_class["refresh"]}" href="/refresh">데이터 갱신</a>
         <a href="/docs">API</a>
       </nav>
     </div>
@@ -80,4 +85,3 @@ def shell(title: str, body: str, *, active: str = "portfolio") -> str:
 </body>
 </html>
 """
-
