@@ -10,8 +10,8 @@ router = APIRouter(prefix="/stock")
 
 
 @router.get("/{page}", response_class=HTMLResponse)
-def stock_page(page: str) -> HTMLResponse:
-    return HTMLResponse(stock_service.render(page))
+def stock_page(page: str, ticker: str | None = None, intent: str | None = None) -> HTMLResponse:
+    return HTMLResponse(stock_service.render(page, ticker=ticker, intent=intent))
 
 
 @router.post("/run")

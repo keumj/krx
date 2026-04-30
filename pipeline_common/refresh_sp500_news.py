@@ -258,6 +258,7 @@ def sync_sp500_news_articles(
     backfill_days: int = DEFAULT_BACKFILL_DAYS,
     overlap_days: int = DEFAULT_INCREMENTAL_OVERLAP_DAYS,
     max_items: int = DEFAULT_MAX_ITEMS,
+    progress_batch_size: int = DEFAULT_PROGRESS_BATCH_SIZE,
     timeout: int = 8,
     components_csv: Path | str = DEFAULT_COMPONENTS_CSV,
     db_path: Path | str | None = None,
@@ -287,10 +288,11 @@ def sync_sp500_news_articles(
             effective_start_date = run_date
         _log(
             f"Starting news sync: symbols={len(symbols)}, as_of_date={run_date.isoformat()}, "
-            f"start_date={effective_start_date.isoformat()}, max_items={max_items}"
+            f"start_date={effective_start_date.isoformat()}, max_items={max_items}, "
+            f"progress_batch_size={progress_batch_size}"
         )
         total_symbols = len(symbols)
-        batch_size = DEFAULT_PROGRESS_BATCH_SIZE
+        batch_size = max(1, int(progress_batch_size))
         batch_start_index = 1
         batch_articles_seen = 0
         batch_window_matches = 0
@@ -333,6 +335,7 @@ def sync_sp500_news_articles(
                     skipped_duplicates += 1
                     batch_skipped_duplicates += 1
             if index % batch_size == 0 or index == total_symbols:
+                conn.commit()
                 _batch_progress_log(
                     batch_start_index=batch_start_index,
                     batch_end_index=index,
@@ -383,6 +386,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--backfill-days", type=int, default=DEFAULT_BACKFILL_DAYS, help="Initial one-time lookback window in days.")
     parser.add_argument("--overlap-days", type=int, default=DEFAULT_INCREMENTAL_OVERLAP_DAYS, help="Overlap window in days for incremental reruns.")
     parser.add_argument("--max-items", type=int, default=DEFAULT_MAX_ITEMS, help="Max Google News RSS items per ticker fetch.")
+    parser.add_argument("--progress-batch-size", type=int, default=DEFAULT_PROGRESS_BATCH_SIZE, help="Ticker count per progress/commit batch.")
     parser.add_argument("--timeout", type=int, default=8, help="HTTP timeout in seconds.")
     parser.add_argument("--components-csv", default=str(DEFAULT_COMPONENTS_CSV), help="Path to S&P 500 components CSV.")
     parser.add_argument("--db-path", default=None, help="Optional SQLite path override.")
@@ -406,6 +410,7 @@ def main(argv: list[str] | None = None) -> int:
             backfill_days=args.backfill_days,
             overlap_days=args.overlap_days,
             max_items=args.max_items,
+            progress_batch_size=args.progress_batch_size,
             timeout=args.timeout,
             components_csv=args.components_csv,
             db_path=args.db_path,
