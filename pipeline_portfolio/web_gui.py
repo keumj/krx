@@ -88,10 +88,6 @@ def _nav(active: str, ctx: _PageContext) -> str:
         ("scoring", "/scoring", "통합 스코어"),
         ("virtual-trade", "/virtual-trade", "가상 거래"),
         ("optimization", "/optimization", "최적화"),
-        ("stock-forecast", "/stock-forecast", "주가 예측"),
-        ("stock-financials", "/stock-financials", "재무/밸류"),
-        ("stock-technical", "/stock-technical", "기술적 분석"),
-        ("stock-wfv", "/stock-wfv", "워크포워드"),
         ("refresh", "/refresh", "데이터 갱신"),
     ]
     links = []
@@ -557,6 +553,7 @@ def _overview_page(ctx: _PageContext) -> str:
           {chart1_html}
         </div>
         <div class="chart-card">
+          {chart2_html}
         </div>
       </div>
     </div>

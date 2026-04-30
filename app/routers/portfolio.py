@@ -1,0 +1,82 @@
+from __future__ import annotations
+
+from fastapi import APIRouter, Request
+from fastapi.responses import HTMLResponse, RedirectResponse
+
+from app.form import read_form
+from app.services import portfolio_service
+
+router = APIRouter()
+
+
+@router.get("/portfolio/{page}", response_class=HTMLResponse)
+def portfolio_page(
+    page: str,
+    intent: str | None = None,
+    lookback_days: int = portfolio_service.DEFAULT_LOOKBACK_DAYS,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> HTMLResponse:
+    return HTMLResponse(
+        portfolio_service.render_page(
+            page,
+            run=str(intent or "").lower() in {"run", "analyze", "refresh"},
+            lookback_days=lookback_days,
+            start_date=start_date,
+            end_date=end_date,
+        )
+    )
+
+
+@router.get("/{legacy_page}", response_class=HTMLResponse)
+def portfolio_legacy_page(
+    legacy_page: str,
+    intent: str | None = None,
+    lookback_days: int = portfolio_service.DEFAULT_LOOKBACK_DAYS,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> HTMLResponse:
+    if legacy_page not in {"data-entry", "attribution", "risk", "scoring", "virtual-trade", "optimization"}:
+        return HTMLResponse("<h1>Not Found</h1>", status_code=404)
+    return HTMLResponse(
+        portfolio_service.render_page(
+            legacy_page,
+            run=str(intent or "").lower() in {"run", "analyze", "refresh"},
+            lookback_days=lookback_days,
+            start_date=start_date,
+            end_date=end_date,
+        )
+    )
+
+
+@router.get("/api/portfolio/dashboard")
+def portfolio_dashboard(
+    lookback_days: int = portfolio_service.DEFAULT_LOOKBACK_DAYS,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> dict[str, object]:
+    return portfolio_service.dashboard_payload(
+        lookback_days=lookback_days,
+        start_date=start_date,
+        end_date=end_date,
+    )
+
+
+@router.post("/run_add_trade")
+async def run_add_trade(request: Request) -> RedirectResponse:
+    form = await read_form(request)
+    portfolio_service.create_trade(form)
+    return RedirectResponse("/portfolio/data-entry?intent=run", status_code=303)
+
+
+@router.post("/run_delete_trade")
+async def run_delete_trade(request: Request) -> RedirectResponse:
+    form = await read_form(request)
+    portfolio_service.remove_trade(int(form.get("trade_id", "0") or 0))
+    return RedirectResponse("/portfolio/data-entry?intent=run", status_code=303)
+
+
+@router.post("/run_virtual_trade", response_class=HTMLResponse)
+async def run_virtual_trade(request: Request) -> HTMLResponse:
+    form = await read_form(request)
+    return HTMLResponse(portfolio_service.render_virtual_trade(form))

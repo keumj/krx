@@ -8,7 +8,17 @@ from .forecast import (
     run_ticker_stock_forecast_pipeline,
 )
 from .technical_analysis import launch_web_gui as launch_technical_web_gui, run_web_gui as run_technical_web_gui
-from .web_gui import launch_web_gui, launch_stock_forecast_web_gui, run_web_gui
+try:
+    from .web_gui import launch_web_gui, launch_stock_forecast_web_gui, run_web_gui
+except Exception:
+    def launch_web_gui(*args, **kwargs):
+        raise RuntimeError("pipeline_stock.web_gui could not be imported. Use app.main single-port service instead.")
+
+    def launch_stock_forecast_web_gui(*args, **kwargs):
+        return launch_web_gui(*args, **kwargs)
+
+    def run_web_gui(*args, **kwargs):
+        return launch_web_gui(*args, **kwargs)
 
 __all__ = [
     "StockForecastResult",

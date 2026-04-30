@@ -1001,7 +1001,6 @@ def _build_direction_model_specs(random_state: int) -> list[tuple[str, object]]:
                     class_weight="balanced",
                     l1_ratios=(0.0,),
                     random_state=random_state,
-                    use_legacy_attributes=False,
                 ),
             ),
         ]

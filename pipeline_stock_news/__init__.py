@@ -20,7 +20,16 @@ from .analysis import (
     run_topic_model,
     run_volatility_regime_after_news,
 )
-from .web_gui import launch_web_gui, run_web_gui
+try:
+    from .web_gui import launch_web_gui, run_web_gui
+except ImportError:
+    def launch_web_gui(*args, **kwargs):
+        from pipeline_portfolio.web_gui import launch_web_gui as _launch_web_gui
+
+        return _launch_web_gui(*args, **kwargs)
+
+    def run_web_gui(*args, **kwargs):
+        return launch_web_gui(*args, **kwargs)
 
 __all__ = [
     "DivergenceResult",

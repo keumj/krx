@@ -1,0 +1,55 @@
+from __future__ import annotations
+
+from fastapi import APIRouter, Request
+from fastapi.responses import HTMLResponse, RedirectResponse
+
+from app.form import read_form
+from app.services import portfolio_service, refresh_service
+
+router = APIRouter()
+
+
+@router.get("/refresh", response_class=HTMLResponse)
+def refresh_page(
+    lookback_days: int = portfolio_service.DEFAULT_LOOKBACK_DAYS,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> HTMLResponse:
+    return HTMLResponse(refresh_service.render_original_refresh_page(
+        lookback_days=lookback_days,
+        start_date=start_date,
+        end_date=end_date,
+    ))
+
+
+@router.get("/refresh_status")
+def refresh_status() -> dict[str, object]:
+    return refresh_service.original_status_payload()
+
+
+@router.post("/run_refresh")
+async def run_refresh(request: Request) -> HTMLResponse:
+    form = await read_form(request)
+    refresh_service.start_original_job(str(form.get("job_id", "")))
+    return HTMLResponse(refresh_service.render_original_refresh_page(
+        lookback_days=int(form.get("lookback_days", portfolio_service.DEFAULT_LOOKBACK_DAYS) or portfolio_service.DEFAULT_LOOKBACK_DAYS),
+        start_date=form.get("start_date") or None,
+        end_date=form.get("end_date") or None,
+    ))
+
+
+@router.get("/api/refresh/jobs")
+def refresh_jobs() -> dict[str, object]:
+    return {"jobs": refresh_service.list_jobs()}
+
+
+@router.post("/api/refresh/jobs/{job_id}/run")
+def start_refresh_job(job_id: str) -> dict[str, object]:
+    return refresh_service.start_original_job(job_id)
+
+
+@router.post("/refresh/{job_id}/run")
+def start_refresh_job_from_page(job_id: str) -> RedirectResponse:
+    refresh_service.start_original_job(job_id)
+    return RedirectResponse("/refresh", status_code=303)
+
