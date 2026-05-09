@@ -24,8 +24,10 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
+import matplotlib.font_manager as fm
 from matplotlib import colors as mcolors
 from matplotlib.patches import Patch
+from pipeline_krx.db import load_latest_index_constituent_history, load_latest_krx_benchmark_snapshot
 
 DEFAULT_PORTFOLIO_DB_ROOT = Path(os.getenv("KEUMJ_PORTFOLIO_DB_DIR", "data/portfolio"))
 DEFAULT_PORTFOLIO_DB_NAME = str(os.getenv("KEUMJ_PORTFOLIO_DB_NAME", "portfolio.sqlite")).strip() or "portfolio.sqlite"
@@ -36,6 +38,20 @@ DEFAULT_TOP_HOLDINGS = 20
 DEFAULT_SECTOR_CAP_PCT = 30.0
 DEFAULT_MAX_POSITION_PCT = 8.0
 DEFAULT_CASH_BUFFER_PCT = 5.0
+DEFAULT_BENCHMARK_CODE = "KOSPI200"
+
+
+def _configure_chart_fonts() -> None:
+    preferred = ["Malgun Gothic", "Noto Sans KR", "NanumGothic", "AppleGothic"]
+    available = {font.name for font in fm.fontManager.ttflist}
+    for name in preferred:
+        if name in available:
+            plt.rcParams["font.family"] = name
+            break
+    plt.rcParams["axes.unicode_minus"] = False
+
+
+_configure_chart_fonts()
 
 # 고정된 섹터별 색상 팔레트 (Portfolio와 KRX 차트 간 일관성 유지)
 SECTOR_COLOR_PALETTE = {
@@ -137,6 +153,118 @@ def _shared_db_path(shared_db: Path | str | None = None) -> Path:
     return Path(shared_db) if shared_db is not None else shared_prices_sqlite_path()
 
 
+def _clean_symbol(value: object) -> str:
+    text = str(value or "").strip().upper()
+    text = "".join(ch for ch in text if ch.isalnum() or ch in {"_", ".", "-"})
+    return text.zfill(6) if text.isdigit() else text
+
+
+def resolve_security_symbol(value: object, *, shared_db: Path | str | None = None) -> str:
+    raw = str(value or "").strip()
+    symbol_candidate = _clean_symbol(raw)
+    if not raw or not symbol_candidate:
+        raise ValueError("ticker must not be empty")
+    if symbol_candidate == "CASH":
+        return "CASH"
+
+    target = _shared_db_path(shared_db)
+    if target.exists():
+        try:
+            with sqlite3.connect(target) as conn:
+                row = conn.execute(
+                    """
+                    SELECT symbol
+                    FROM securities
+                    WHERE UPPER(symbol) = ?
+                       OR UPPER(REPLACE(symbol, ' ', '')) = ?
+                    ORDER BY is_active DESC, market ASC, symbol ASC
+                    LIMIT 1
+                    """,
+                    (symbol_candidate, symbol_candidate),
+                ).fetchone()
+                if row and row[0]:
+                    return str(row[0]).strip().upper()
+
+                exact_rows = conn.execute(
+                    """
+                    SELECT symbol, name_kr, name_en, market, is_active
+                    FROM securities
+                    WHERE name_kr = ?
+                       OR UPPER(name_en) = UPPER(?)
+                    ORDER BY is_active DESC, market ASC, symbol ASC
+                    LIMIT 5
+                    """,
+                    (raw, raw),
+                ).fetchall()
+                if len(exact_rows) == 1:
+                    return str(exact_rows[0][0]).strip().upper()
+                if len(exact_rows) > 1:
+                    matches = ", ".join(f"{row[1] or row[2]}({row[0]})" for row in exact_rows)
+                    raise ValueError(f"ambiguous ticker/name '{raw}': {matches}")
+
+                like = f"%{raw}%"
+                like_rows = conn.execute(
+                    """
+                    SELECT symbol, name_kr, name_en, market, is_active
+                    FROM securities
+                    WHERE name_kr LIKE ?
+                       OR UPPER(name_en) LIKE UPPER(?)
+                    ORDER BY
+                        CASE WHEN name_kr = ? OR UPPER(name_en) = UPPER(?) THEN 0 ELSE 1 END,
+                        is_active DESC,
+                        market ASC,
+                        symbol ASC
+                    LIMIT 6
+                    """,
+                    (like, like, raw, raw),
+                ).fetchall()
+                if len(like_rows) == 1:
+                    return str(like_rows[0][0]).strip().upper()
+                if len(like_rows) > 1:
+                    matches = ", ".join(f"{row[1] or row[2]}({row[0]})" for row in like_rows[:5])
+                    raise ValueError(f"ambiguous ticker/name '{raw}': {matches}")
+        except sqlite3.Error:
+            pass
+
+    if all(ch.isascii() and (ch.isalnum() or ch in {"_", ".", "-"}) for ch in raw):
+        return symbol_candidate
+    raise ValueError(f"ticker/name '{raw}' was not found in the shared DB securities table")
+
+
+def resolve_trade_close_price(
+    ticker: str,
+    trade_date: str | pd.Timestamp,
+    *,
+    shared_db: Path | str | None = None,
+) -> float:
+    symbol = resolve_security_symbol(ticker, shared_db=shared_db)
+    if symbol == "CASH":
+        return 1.0
+    trade_text = pd.Timestamp(trade_date).normalize().strftime("%Y-%m-%d")
+    target = _shared_db_path(shared_db)
+    if not target.exists():
+        raise ValueError(f"price is required because shared DB is missing: {target}")
+    with sqlite3.connect(target) as conn:
+        row = conn.execute(
+            """
+            SELECT close
+            FROM prices
+            WHERE symbol = ?
+              AND date <= ?
+              AND close IS NOT NULL
+            ORDER BY date DESC
+            LIMIT 1
+            """,
+            (symbol, trade_text),
+        ).fetchone()
+    if not row or row[0] is None:
+        raise ValueError(f"close price not found for {symbol} on or before {trade_text}")
+    price_value = float(row[0])
+    if not np.isfinite(price_value) or price_value <= 0:
+        raise ValueError(f"invalid close price for {symbol} on or before {trade_text}")
+    return price_value
+
+
 def ensure_portfolio_db(db_path: Path | str | None = None) -> Path:
     target = portfolio_db_path(db_path)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -172,24 +300,25 @@ def add_trade(
     ticker: str,
     side: str,
     quantity: float,
-    price: float,
+    price: float | None,
     fees: float = 0.0,
     notes: str = "",
     db_path: Path | str | None = None,
     user_id: str | None = None,
+    shared_db: Path | str | None = None,
 ) -> int:
     target = ensure_portfolio_db(db_path)
     side_clean = str(side or "").strip().upper()
     if side_clean not in {"BUY", "SELL"}:
         raise ValueError("side must be BUY or SELL")
-    ticker_clean = str(ticker or "").strip().upper()
-    if not ticker_clean:
-        raise ValueError("ticker must not be empty")
+    ticker_clean = resolve_security_symbol(ticker, shared_db=shared_db)
     trade_ts = pd.Timestamp(trade_date).normalize().strftime("%Y-%m-%d")
     quantity_value = float(quantity)
-    price_value = float(price)
+    price_value = float(price) if price is not None and str(price).strip() else 0.0
+    if price_value <= 0:
+        price_value = resolve_trade_close_price(ticker_clean, trade_ts, shared_db=shared_db)
     fee_value = float(fees)
-    if quantity_value <= 0 or price_value <= 0:
+    if quantity_value <= 0 or (not np.isfinite(price_value)) or price_value <= 0:
         raise ValueError("quantity and price must be positive")
     if fee_value < 0:
         raise ValueError("fees must be non-negative")
@@ -261,6 +390,22 @@ def _load_component_frame(max_symbols: int = 0) -> tuple[pd.DataFrame, str]:
     load_count = requested if requested > 0 else 10_000
     components, source = load_krx_components(max_symbols=load_count)
     out = components.copy()
+    if out.empty and str(source).startswith("unavailable:"):
+        target = _shared_db_path()
+        if target.exists():
+            try:
+                query = """
+                    SELECT symbol AS Symbol,
+                           COALESCE(NULLIF(sector, ''), 'Unknown') AS Sector
+                    FROM securities
+                    WHERE COALESCE(is_active, 1) = 1
+                    ORDER BY market ASC, symbol ASC
+                """
+                with sqlite3.connect(target) as conn:
+                    out = pd.read_sql_query(query, conn)
+                source = f"sqlite:{target.as_posix()}:securities"
+            except Exception:
+                out = components.copy()
     out["Symbol"] = out["Symbol"].astype(str).str.strip().str.upper()
     out["Sector"] = out["Sector"].astype(str).str.strip().replace({"": "Unknown", "nan": "Unknown"})
     out = out.dropna(subset=["Symbol"]).drop_duplicates(subset=["Symbol"], keep="last")
@@ -274,6 +419,125 @@ def _sector_map(max_symbols: int = 0) -> tuple[dict[str, str], str]:
     return dict(zip(components["Symbol"], components["Sector"])), source
 
 
+def _latest_market_caps_for_symbols(
+    symbols: list[str],
+    *,
+    shared_db: Path | str | None = None,
+) -> dict[str, float]:
+    normalized = [str(symbol or "").strip().upper() for symbol in symbols if str(symbol or "").strip()]
+    if not normalized:
+        return {}
+    target = _shared_db_path(shared_db)
+    if not target.exists():
+        return {}
+    placeholders = ",".join("?" for _ in normalized)
+    query = f"""
+        WITH latest_caps AS (
+            SELECT symbol, MAX(date) AS date
+            FROM prices
+            WHERE symbol IN ({placeholders})
+              AND market_cap IS NOT NULL
+            GROUP BY symbol
+        )
+        SELECT p.symbol, p.market_cap
+        FROM prices AS p
+        INNER JOIN latest_caps AS latest
+            ON latest.symbol = p.symbol
+           AND latest.date = p.date
+    """
+    try:
+        with sqlite3.connect(target) as conn:
+            rows = conn.execute(query, normalized).fetchall()
+    except Exception:
+        return {}
+    out: dict[str, float] = {}
+    for symbol, market_cap in rows:
+        try:
+            value = float(market_cap)
+        except Exception:
+            continue
+        if np.isfinite(value) and value > 0:
+            out[str(symbol).strip().upper()] = value
+    return out
+
+
+def _load_kospi200_benchmark_frame(
+    *,
+    shared_db: Path | str | None = None,
+    max_symbols: int = 200,
+) -> tuple[pd.DataFrame, str]:
+    target = _shared_db_path(shared_db)
+    history = load_latest_index_constituent_history(DEFAULT_BENCHMARK_CODE, db_path=target)
+    if history is not None and not history.empty:
+        frame = history.rename(columns={"symbol": "Symbol", "sector": "Sector"}).copy()
+        frame["Symbol"] = frame["Symbol"].astype(str).str.strip().str.upper()
+        frame["Sector"] = frame["Sector"].astype(str).str.strip().replace({"": "Unknown", "nan": "Unknown"})
+        caps = _latest_market_caps_for_symbols(frame["Symbol"].astype(str).tolist(), shared_db=shared_db)
+        frame["market_cap"] = frame["Symbol"].map(caps).fillna(0.0)
+        total = float(pd.to_numeric(frame["market_cap"], errors="coerce").fillna(0.0).sum())
+        frame["benchmark_weight"] = (
+            pd.to_numeric(frame["market_cap"], errors="coerce").fillna(0.0) / total
+            if total > 0
+            else 1.0 / len(frame.index)
+        )
+        return frame[["Symbol", "Sector", "benchmark_weight"]], f"sqlite:{target.as_posix()}:index_constituent_history:{DEFAULT_BENCHMARK_CODE}"
+
+    snapshot = load_latest_krx_benchmark_snapshot(DEFAULT_BENCHMARK_CODE, db_path=target)
+    if snapshot is not None and not snapshot.empty:
+        frame = snapshot.rename(columns={"symbol": "Symbol", "sector": "Sector"}).copy()
+        frame["Symbol"] = frame["Symbol"].astype(str).str.strip().str.upper()
+        frame["Sector"] = frame["Sector"].astype(str).str.strip().replace({"": "Unknown", "nan": "Unknown"})
+        frame["benchmark_weight"] = pd.to_numeric(frame.get("benchmark_weight"), errors="coerce")
+        frame = frame.dropna(subset=["Symbol"]).drop_duplicates(subset=["Symbol"], keep="first")
+        return frame[["Symbol", "Sector", "benchmark_weight"]], f"sqlite:{target.as_posix()}:benchmark_constituents:{DEFAULT_BENCHMARK_CODE}"
+
+    if not target.exists():
+        return pd.DataFrame(columns=["Symbol", "Sector", "benchmark_weight"]), "unavailable:kospi200_benchmark_missing"
+
+    try:
+        as_of_date = _get_db_max_date(shared_db).strftime("%Y-%m-%d")
+        query = """
+            WITH latest_caps AS (
+                SELECT p.symbol, p.market_cap, p.date
+                FROM prices AS p
+                INNER JOIN (
+                    SELECT symbol, MAX(date) AS date
+                    FROM prices
+                    WHERE date <= ?
+                      AND market_cap IS NOT NULL
+                    GROUP BY symbol
+                ) AS latest
+                    ON latest.symbol = p.symbol
+                   AND latest.date = p.date
+            )
+            SELECT
+                s.symbol AS Symbol,
+                COALESCE(NULLIF(s.sector, ''), 'Unknown') AS Sector,
+                latest_caps.market_cap AS market_cap
+            FROM securities AS s
+            INNER JOIN latest_caps
+                ON latest_caps.symbol = s.symbol
+            WHERE s.market = 'KOSPI'
+              AND COALESCE(s.is_active, 1) = 1
+              AND latest_caps.market_cap > 0
+            ORDER BY latest_caps.market_cap DESC, s.symbol ASC
+            LIMIT ?
+        """
+        with sqlite3.connect(target) as conn:
+            frame = pd.read_sql_query(query, conn, params=[as_of_date, int(max_symbols)])
+    except Exception:
+        return pd.DataFrame(columns=["Symbol", "Sector", "benchmark_weight"]), "unavailable:kospi200_proxy_failed"
+
+    if frame.empty:
+        return pd.DataFrame(columns=["Symbol", "Sector", "benchmark_weight"]), "unavailable:kospi200_proxy_empty"
+    frame["Symbol"] = frame["Symbol"].astype(str).str.strip().str.upper()
+    frame["Sector"] = frame["Sector"].astype(str).str.strip().replace({"": "Unknown", "nan": "Unknown"})
+    caps = pd.to_numeric(frame["market_cap"], errors="coerce").fillna(0.0)
+    total = float(caps.sum())
+    frame["benchmark_weight"] = caps / total if total > 0 else 1.0 / len(frame.index)
+    return frame[["Symbol", "Sector", "benchmark_weight"]], f"sqlite:{target.as_posix()}:kospi_top200_proxy"
+
+
 def _latest_news_signals(
     tickers: list[str],
     *,
@@ -283,13 +547,30 @@ def _latest_news_signals(
     if not tickers:
         return pd.DataFrame(columns=["ticker", "recent_news_count", "avg_sentiment_score", "news_signal_score"])
     target = _shared_db_path(shared_db)
+    if not target.exists():
+        return pd.DataFrame(
+            [{"ticker": ticker, "recent_news_count": 0, "avg_sentiment_score": np.nan, "news_signal_score": 50.0} for ticker in tickers]
+        )
     placeholders = ",".join("?" for _ in tickers)
     db_now = _get_db_max_date(shared_db)
     start_date = (db_now - pd.Timedelta(days=max(int(lookback_days), 1))).strftime("%Y-%m-%d")
+    with sqlite3.connect(target) as conn:
+        try:
+            news_columns = {
+                str(row[1]).lower()
+                for row in conn.execute("PRAGMA table_info(news_articles)").fetchall()
+            }
+        except Exception:
+            news_columns = set()
+    ticker_column = "ticker" if "ticker" in news_columns else "symbol" if "symbol" in news_columns else ""
+    if not ticker_column:
+        return pd.DataFrame(
+            [{"ticker": ticker, "recent_news_count": 0, "avg_sentiment_score": np.nan, "news_signal_score": 50.0} for ticker in tickers]
+        )
     query = f"""
-        SELECT ticker, publish_date, title, sentiment_score
+        SELECT {ticker_column} AS ticker, publish_date, title, sentiment_score
         FROM news_articles
-        WHERE ticker IN ({placeholders})
+        WHERE {ticker_column} IN ({placeholders})
           AND date(publish_date) >= ?
         ORDER BY publish_date DESC, id DESC
     """
@@ -648,7 +929,7 @@ def _build_cumulative_return_chart(portfolio_daily: pd.Series, benchmark_daily: 
     
     fig, ax = plt.subplots(figsize=(10, 4))
     ax.plot(p_cum.index, p_cum.values, label="Portfolio", color="#0f4c81", linewidth=2.5)
-    ax.plot(b_cum.index, b_cum.values, label="KRX", color="#b26a00", linewidth=1.5, linestyle="--")
+    ax.plot(b_cum.index, b_cum.values, label="KOSPI 200", color="#b26a00", linewidth=1.5, linestyle="--")
     
     ax.axhline(100, color="black", linewidth=0.8, alpha=0.5)
     ax.set_title("Cumulative Performance (Rebased to 100)", fontsize=12, pad=10)
@@ -660,6 +941,8 @@ def _build_cumulative_return_chart(portfolio_daily: pd.Series, benchmark_daily: 
 
 
 def _build_sector_contribution_chart(attribution: pd.DataFrame) -> str:
+    if attribution.empty or "sector" not in attribution.columns or "total_effect_pct" not in attribution.columns:
+        return ""
     df = attribution[attribution["sector"] != "Total"].copy()
     if df.empty: return ""
     df = df.sort_values("total_effect_pct", ascending=True)
@@ -688,7 +971,7 @@ def _build_style_exposure_chart(exposure: pd.DataFrame) -> str:
     p_colors = [SECTOR_COLOR_PALETTE["Cash"] if b == "Cash" else "#0f4c81" for b in buckets]
 
     ax.bar(x - width/2, df["portfolio_weight_pct"], width, color=p_colors)
-    ax.bar(x + width/2, df["benchmark_weight_pct"], width, label='KRX', color="#b26a00", alpha=0.6)
+    ax.bar(x + width/2, df["benchmark_weight_pct"], width, label='KOSPI 200', color="#b26a00", alpha=0.6)
     
     # 범례에 Cash 색상을 반영하기 위해 커스텀 핸들 생성
     legend_elements = []
@@ -702,7 +985,7 @@ def _build_style_exposure_chart(exposure: pd.DataFrame) -> str:
         legend_elements.append(Patch(facecolor=SECTOR_COLOR_PALETTE["Cash"], label='Portfolio (Cash)'))
         
     # 벤치마크 핸들 추가
-    legend_elements.append(Patch(facecolor="#b26a00", alpha=0.6, label='KRX'))
+    legend_elements.append(Patch(facecolor="#b26a00", alpha=0.6, label='KOSPI 200'))
 
     ax.set_title("Style Exposure Comparison", fontsize=12)
     ax.set_ylabel("Weight (%)")
@@ -864,7 +1147,8 @@ def _build_sector_treemap_chart(alloc: pd.Series, *, title: str, base_color: str
 
 
 def _build_sector_allocation_chart(positions: pd.DataFrame, sector_order: list[str] | None = None) -> str:
-    if positions.empty: return ""
+    if positions.empty or "market_value" not in positions.columns or "sector" not in positions.columns:
+        return ""
     # 시장 가치가 있는 포지션만 집계 (현금 포함)
     df = positions[positions["market_value"] > 0].copy()
     if df.empty: return ""
@@ -885,7 +1169,8 @@ def _build_sector_allocation_chart(positions: pd.DataFrame, sector_order: list[s
 
 def _build_rebalancing_chart(current_positions: pd.DataFrame, target_alloc: pd.DataFrame, title: str) -> str:
     """현재 포트폴리오 비중과 최적화 목표 비중의 차이를 시각화합니다."""
-    if target_alloc.empty: return ""
+    if target_alloc.empty or "ticker" not in target_alloc.columns or "target_weight_pct" not in target_alloc.columns:
+        return ""
     
     # 현재 비중 (CASH 포함)
     curr = current_positions.set_index("ticker")["portfolio_weight"].astype(float) if not current_positions.empty else pd.Series(dtype=float)
@@ -926,12 +1211,13 @@ def _build_benchmark_sector_allocation_chart(benchmark_weights: pd.Series, secto
 
     alloc = w_df.groupby("sector")["weight"].sum().sort_values(ascending=False)
 
-    chart = _build_sector_treemap_chart(alloc, title="KRX Sector Weights", base_color="#b26a00")
+    chart = _build_sector_treemap_chart(alloc, title="KOSPI 200 Sector Weights", base_color="#b26a00")
     return chart, alloc.index.tolist()
 
 
 def _build_risk_contribution_chart(contributions: pd.DataFrame) -> str:
-    if contributions.empty: return ""
+    if contributions.empty or "ticker" not in contributions.columns or "risk_contribution_pct" not in contributions.columns:
+        return ""
     # 기여도가 높은 상위 15개 종목만 표시
     df = contributions.head(15).copy().sort_values("risk_contribution_pct", ascending=True)
     
@@ -952,7 +1238,8 @@ def _build_risk_contribution_chart(contributions: pd.DataFrame) -> str:
 
 
 def _build_active_risk_contribution_chart(contributions: pd.DataFrame) -> str:
-    if contributions.empty: return ""
+    if contributions.empty or "ticker" not in contributions.columns or "active_risk_contribution_pct" not in contributions.columns:
+        return ""
     # 기여도가 높은 상위 15개 종목만 표시
     df = contributions.head(15).copy().sort_values("active_risk_contribution_pct", ascending=True)
     
@@ -1130,16 +1417,21 @@ def _benchmark_series(
     close_history: pd.DataFrame,
     market_caps: pd.DataFrame,
     sector_frame: pd.DataFrame,
+    benchmark_weights: pd.Series | None = None,
 ) -> tuple[pd.Series, pd.DataFrame, pd.Series]:
     if close_history.empty:
         return pd.Series(dtype=float), pd.DataFrame(), pd.Series(dtype=float)
     universe_returns = close_history.sort_index().pct_change(fill_method=None)
     if universe_returns.empty:
         return pd.Series(dtype=float), pd.DataFrame(), pd.Series(dtype=float)
-    if not market_caps.empty:
+    if benchmark_weights is not None and not benchmark_weights.empty:
+        weights = _normalize_weights(pd.to_numeric(benchmark_weights, errors="coerce").reindex(universe_returns.columns))
+    elif not market_caps.empty:
         latest_caps = market_caps.ffill().iloc[-1].reindex(universe_returns.columns)
         weights = _normalize_weights(latest_caps)
     else:
+        weights = pd.Series(1.0 / len(universe_returns.columns), index=universe_returns.columns)
+    if float(weights.sum()) <= 0:
         weights = pd.Series(1.0 / len(universe_returns.columns), index=universe_returns.columns)
     benchmark = universe_returns.mul(weights, axis=1).sum(axis=1, min_count=1).dropna()
     sector_lookup = dict(zip(sector_frame["Symbol"], sector_frame["Sector"]))
@@ -1719,8 +2011,26 @@ def _build_scoring(
     shared_db: Path | str | None = None,
     as_of_date: str | pd.Timestamp | None = None,
 ) -> tuple[pd.DataFrame, str]:
+    scoring_columns = [
+        "ticker",
+        "sector",
+        "portfolio_weight_pct",
+        "momentum_20d_pct",
+        "momentum_60d_pct",
+        "distance_sma20_pct",
+        "volatility_20d_pct",
+        "technical_score",
+        "recent_news_count",
+        "avg_sentiment_score",
+        "news_signal_score",
+        "roe",
+        "per",
+        "pbr",
+        "financial_score",
+        "integrated_score",
+    ]
     if positions.empty:
-        return pd.DataFrame(), "financial_metrics:not_available"
+        return pd.DataFrame(columns=scoring_columns), "financial_metrics:not_available"
     technical = _technical_snapshot(close_history)
     news = _latest_news_signals(positions["ticker"].astype(str).tolist(), shared_db=shared_db)
     financial, financial_source = _load_optional_financial_metrics(
@@ -1748,6 +2058,9 @@ def _build_scoring(
         + frame["financial_score"] * 0.3
     ).clip(0.0, 100.0)
     out = frame.rename(columns={"portfolio_weight": "portfolio_weight_pct"})
+    for column in scoring_columns:
+        if column not in out.columns:
+            out[column] = np.nan
     return out.sort_values(["integrated_score", "portfolio_weight_pct"], ascending=[False, False]).reset_index(drop=True), financial_source
 
 
@@ -1864,8 +2177,8 @@ def _allocation_frame_from_weights(
             target_amt = (target_pct / 100.0) * total_portfolio_value
             curr_amt = (current_pct / 100.0) * total_portfolio_value
             diff_amt = target_amt - curr_amt
-            if abs(diff_amt) > 1.0: # $1 이상의 유의미한 차이만 표시
-                trade_text = f"{'DEPOSIT' if diff_amt > 0 else 'WITHDRAW'} ${abs(diff_amt):,.0f}"
+            if abs(diff_amt) > 1.0: # 1원 이상의 유의미한 차이만 표시
+                trade_text = f"{'DEPOSIT' if diff_amt > 0 else 'WITHDRAW'} {abs(diff_amt):,.0f} KRW"
 
         elif not is_cash and total_portfolio_value > 0 and price_map:
             price = price_map.get(str(symbol), 0.0)
@@ -1890,6 +2203,267 @@ def _allocation_frame_from_weights(
             }
         )
     return pd.DataFrame(rows).sort_values("target_weight_pct", ascending=False).reset_index(drop=True)
+
+
+def _sector_target_weights(frame: pd.DataFrame) -> pd.Series:
+    if frame.empty or "Sector" not in frame.columns:
+        return pd.Series(dtype=float)
+    working = frame.copy()
+    working["Sector"] = working["Sector"].astype(str).str.strip().replace({"": "Unknown", "nan": "Unknown"})
+    if "benchmark_weight" in working.columns:
+        basis = pd.to_numeric(working["benchmark_weight"], errors="coerce").fillna(0.0)
+    elif "market_cap" in working.columns:
+        basis = pd.to_numeric(working["market_cap"], errors="coerce").fillna(0.0)
+    else:
+        basis = pd.Series(1.0, index=working.index)
+    sector_weights = basis.groupby(working["Sector"]).sum()
+    return _normalize_weights(sector_weights[sector_weights > 0])
+
+
+def _sector_balanced_universe(
+    frame: pd.DataFrame,
+    *,
+    universe_size: int,
+    current_symbols: set[str] | None = None,
+) -> pd.DataFrame:
+    if frame.empty:
+        return pd.DataFrame(columns=["Symbol", "Sector", "market_cap", "benchmark_weight"])
+    requested = max(int(universe_size), 1)
+    current_symbols = {str(symbol).strip().upper() for symbol in (current_symbols or set()) if str(symbol).strip()}
+    working = frame.copy()
+    working["Symbol"] = working["Symbol"].astype(str).str.strip().str.upper()
+    working["Sector"] = working["Sector"].astype(str).str.strip().replace({"": "Unknown", "nan": "Unknown"})
+    if "market_cap" not in working.columns:
+        working["market_cap"] = 0.0
+    if "benchmark_weight" not in working.columns:
+        working["benchmark_weight"] = np.nan
+    working["market_cap"] = pd.to_numeric(working["market_cap"], errors="coerce").fillna(0.0)
+    working["benchmark_weight"] = pd.to_numeric(working["benchmark_weight"], errors="coerce")
+    working = working.dropna(subset=["Symbol"]).drop_duplicates(subset=["Symbol"], keep="first")
+    working = working.sort_values(["Sector", "market_cap", "Symbol"], ascending=[True, False, True])
+
+    sector_weights = _sector_target_weights(working)
+    if sector_weights.empty:
+        sector_weights = _normalize_weights(working.groupby("Sector")["market_cap"].sum())
+    if sector_weights.empty:
+        sector_weights = pd.Series(1.0 / max(working["Sector"].nunique(), 1), index=sorted(working["Sector"].unique()))
+
+    raw_quota = sector_weights * requested
+    quotas = np.floor(raw_quota).astype(int)
+    for sector in sector_weights.index:
+        if sector in set(working["Sector"]) and quotas.get(sector, 0) <= 0:
+            quotas.loc[sector] = 1
+    while int(quotas.sum()) > requested and len(quotas) > 0:
+        reducible = quotas[quotas > 1]
+        if reducible.empty:
+            break
+        sector = (raw_quota.reindex(reducible.index).fillna(0.0) - reducible).idxmin()
+        quotas.loc[sector] -= 1
+    remainder = requested - int(quotas.sum())
+    if remainder > 0:
+        fractional = (raw_quota - np.floor(raw_quota)).sort_values(ascending=False)
+        for sector in fractional.index:
+            if remainder <= 0:
+                break
+            if sector not in set(working["Sector"]):
+                continue
+            quotas.loc[sector] = int(quotas.get(sector, 0)) + 1
+            remainder -= 1
+
+    selected_parts: list[pd.DataFrame] = []
+    for sector, quota in quotas.items():
+        if int(quota) <= 0:
+            continue
+        members = working[working["Sector"].eq(sector)].sort_values(["market_cap", "Symbol"], ascending=[False, True])
+        selected_parts.append(members.head(int(quota)))
+    selected = pd.concat(selected_parts, ignore_index=True) if selected_parts else working.head(requested).copy()
+
+    missing_current = [symbol for symbol in current_symbols if symbol != "CASH" and symbol not in set(selected["Symbol"])]
+    if missing_current:
+        selected = pd.concat([selected, working[working["Symbol"].isin(missing_current)]], ignore_index=True)
+    if len(selected.index) < requested:
+        remaining = working[~working["Symbol"].isin(set(selected["Symbol"]))]
+        selected = pd.concat([selected, remaining.sort_values(["market_cap", "Symbol"], ascending=[False, True]).head(requested - len(selected.index))])
+    return (
+        selected.drop_duplicates(subset=["Symbol"], keep="first")
+        .sort_values(["Sector", "market_cap", "Symbol"], ascending=[True, False, True])
+        .reset_index(drop=True)
+    )
+
+
+def _allocation_frame_from_share_targets(
+    target_shares: pd.Series,
+    *,
+    sector_lookup: dict[str, str],
+    annual_return: pd.Series,
+    annual_vol: pd.Series,
+    score_map: pd.Series,
+    current_weights: pd.Series | None = None,
+    total_portfolio_value: float = 0.0,
+    current_shares: pd.Series | None = None,
+    price_map: dict[str, float] | None = None,
+) -> pd.DataFrame:
+    price_map = price_map or {}
+    rows: list[dict[str, object]] = []
+    share_targets = pd.to_numeric(target_shares, errors="coerce").fillna(0.0)
+    all_symbols = sorted(set(share_targets.index) | set(current_weights.index if current_weights is not None else []))
+    invested_amount = 0.0
+
+    for symbol in all_symbols:
+        symbol = str(symbol)
+        is_cash = symbol.upper() == "CASH"
+        if is_cash:
+            continue
+        price = float(price_map.get(symbol, 0.0) or 0.0)
+        target_qty = int(max(np.floor(float(share_targets.get(symbol, 0.0))), 0))
+        curr_qty = float(current_shares.get(symbol, 0.0)) if current_shares is not None else 0.0
+        current_pct = float(current_weights.get(symbol, 0.0)) if current_weights is not None else 0.0
+        target_amount = target_qty * price
+        invested_amount += target_amount
+        target_pct = (target_amount / total_portfolio_value * 100.0) if total_portfolio_value > 0 else 0.0
+        if target_qty <= 0 and current_pct <= 0 and abs(curr_qty) <= 1e-9:
+            continue
+        diff_qty = target_qty - int(round(curr_qty))
+        trade_text = "-" if diff_qty == 0 else f"{'BUY' if diff_qty > 0 else 'SELL'} {abs(int(diff_qty))}"
+        rows.append(
+            {
+                "ticker": symbol,
+                "sector": sector_lookup.get(symbol, "Unknown"),
+                "target_shares": int(target_qty),
+                "current_shares": int(round(curr_qty)),
+                "share_delta": int(diff_qty),
+                "target_amount": float(target_amount),
+                "target_weight_pct": target_pct,
+                "current_weight_pct": current_pct,
+                "diff_weight_pct": target_pct - current_pct,
+                "suggested_trade": trade_text,
+                "expected_return_pct": float(annual_return.reindex([symbol]).fillna(0.0).iloc[0] * 100.0),
+                "volatility_pct": float(annual_vol.reindex([symbol]).fillna(0.0).iloc[0] * 100.0),
+                "integrated_score": float(score_map.reindex([symbol]).fillna(0.5).iloc[0] * 100.0),
+            }
+        )
+
+    current_cash_pct = float(current_weights.get("CASH", 0.0)) if current_weights is not None else 0.0
+    target_cash = max(float(total_portfolio_value) - invested_amount, 0.0)
+    target_cash_pct = (target_cash / total_portfolio_value * 100.0) if total_portfolio_value > 0 else 100.0
+    cash_diff = target_cash_pct - current_cash_pct
+    rows.append(
+        {
+            "ticker": "CASH",
+            "sector": "Cash",
+            "target_shares": int(round(target_cash)),
+            "current_shares": int(round((current_cash_pct / 100.0) * total_portfolio_value)) if total_portfolio_value > 0 else 0,
+            "share_delta": int(round((cash_diff / 100.0) * total_portfolio_value)) if total_portfolio_value > 0 else 0,
+            "target_amount": float(target_cash),
+            "target_weight_pct": target_cash_pct,
+            "current_weight_pct": current_cash_pct,
+            "diff_weight_pct": cash_diff,
+            "suggested_trade": "-",
+            "expected_return_pct": 0.0,
+            "volatility_pct": 0.0,
+            "integrated_score": np.nan,
+        }
+    )
+    return pd.DataFrame(rows).sort_values("target_weight_pct", ascending=False).reset_index(drop=True)
+
+
+def _build_share_targets(
+    candidates: pd.DataFrame,
+    *,
+    sector_targets: pd.Series,
+    total_portfolio_value: float,
+    cash_buffer_pct: float,
+    max_position_pct: float,
+    rank_signal: pd.Series,
+) -> tuple[pd.Series, dict[str, float]]:
+    if candidates.empty or total_portfolio_value <= 0:
+        return pd.Series(dtype=float), {"actual_cash_weight_pct": 100.0}
+    working = candidates.copy()
+    working["Symbol"] = working["Symbol"].astype(str).str.strip().str.upper()
+    working["Sector"] = working["Sector"].astype(str).str.strip().replace({"": "Unknown", "nan": "Unknown"})
+    working["price"] = pd.to_numeric(working.get("price"), errors="coerce").fillna(0.0)
+    working["market_cap"] = pd.to_numeric(working.get("market_cap"), errors="coerce").fillna(0.0)
+    working = working[working["price"] > 0].drop_duplicates(subset=["Symbol"], keep="first")
+    if working.empty:
+        return pd.Series(dtype=float), {"actual_cash_weight_pct": 100.0}
+
+    cash_target = min(max(float(cash_buffer_pct), 0.0), 95.0) / 100.0
+    budget = max(float(total_portfolio_value) * (1.0 - cash_target), 0.0)
+    position_cap = max(float(max_position_pct), 0.0) / 100.0 * float(total_portfolio_value)
+    shares = pd.Series(0, index=working["Symbol"].tolist(), dtype=int)
+    spent_by_sector = pd.Series(0.0, index=sorted(working["Sector"].unique()))
+    sector_budget = _normalize_weights(sector_targets.reindex(spent_by_sector.index).fillna(0.0))
+    if sector_budget.empty or float(sector_budget.sum()) <= 0:
+        sector_budget = _normalize_weights(working.groupby("Sector")["market_cap"].sum()).reindex(spent_by_sector.index).fillna(0.0)
+    if float(sector_budget.sum()) <= 0:
+        sector_budget = pd.Series(1.0 / len(spent_by_sector.index), index=spent_by_sector.index)
+    sector_budget = sector_budget / float(sector_budget.sum()) * budget
+
+    rank = pd.to_numeric(rank_signal, errors="coerce").replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    working["rank_signal"] = working["Symbol"].map(rank).fillna(0.0)
+    if float(working["rank_signal"].clip(lower=0.0).sum()) <= 0:
+        working["rank_signal"] = working["market_cap"]
+    working["rank_signal"] = working["rank_signal"].clip(lower=0.0)
+
+    for sector, sector_rows in working.groupby("Sector"):
+        target_budget = float(sector_budget.get(sector, 0.0))
+        if target_budget <= 0:
+            continue
+        sector_rows = sector_rows.sort_values(["rank_signal", "market_cap", "Symbol"], ascending=[False, False, True])
+        basis = sector_rows["rank_signal"].where(sector_rows["rank_signal"] > 0, sector_rows["market_cap"])
+        basis = basis.clip(lower=0.0)
+        if float(basis.sum()) <= 0:
+            basis = pd.Series(1.0, index=sector_rows.index)
+        for idx, row in sector_rows.iterrows():
+            symbol = str(row["Symbol"])
+            price = float(row["price"])
+            position_limit = position_cap if position_cap > 0 else target_budget
+            desired = target_budget * float(basis.loc[idx]) / float(basis.sum())
+            qty = int(np.floor(min(desired, position_limit) / price))
+            if qty > 0:
+                shares.loc[symbol] += qty
+                spent_by_sector.loc[sector] += qty * price
+
+    def _can_add(row: pd.Series, total_spent: float) -> bool:
+        symbol = str(row["Symbol"])
+        price = float(row["price"])
+        position_limit = position_cap if position_cap > 0 else budget
+        if total_spent + price > budget:
+            return False
+        return (float(shares.get(symbol, 0)) + 1.0) * price <= position_limit + 1e-9
+
+    total_spent = float((shares.reindex(working["Symbol"]).fillna(0).to_numpy() * working["price"].to_numpy()).sum())
+    min_price = float(working["price"].min())
+    for _ in range(max(len(working.index) * 8, 1)):
+        if total_spent + min_price > budget:
+            break
+        scored = working.copy()
+        scored["sector_gap"] = scored["Sector"].map(sector_budget - spent_by_sector).fillna(0.0)
+        scored = scored[scored["sector_gap"] > 0].sort_values(
+            ["sector_gap", "rank_signal", "market_cap", "Symbol"],
+            ascending=[False, False, False, True],
+        )
+        added = False
+        for _, row in scored.iterrows():
+            if not _can_add(row, total_spent):
+                continue
+            symbol = str(row["Symbol"])
+            price = float(row["price"])
+            shares.loc[symbol] += 1
+            sector = str(row["Sector"])
+            spent_by_sector.loc[sector] += price
+            total_spent += price
+            added = True
+            break
+        if not added:
+            break
+
+    actual_cash = max(float(total_portfolio_value) - total_spent, 0.0) / float(total_portfolio_value) * 100.0
+    return shares[shares > 0].astype(int), {
+        "requested_cash_buffer_pct": float(cash_buffer_pct),
+        "actual_cash_weight_pct": actual_cash,
+        "max_position_pct": float(max_position_pct),
+    }
 
 
 def _forecast_return_proxy(close_history: pd.DataFrame, ticker: str, horizon_days: int) -> float:
@@ -1949,7 +2523,7 @@ def build_portfolio_dashboard(
     cash_warning = ""
     cash_row = positions_raw[positions_raw["ticker"] == "CASH"]
     if not cash_row.empty and float(cash_row.iloc[0]["net_quantity"]) < 0:
-        cash_warning = f"경고: 현재 현금 잔고가 마이너스(${abs(float(cash_row.iloc[0]['net_quantity'])):,.2f})입니다. 초과 매수 상태를 점검하세요."
+        cash_warning = f"경고: 현재 현금 잔고가 마이너스({abs(float(cash_row.iloc[0]['net_quantity'])):,.0f} KRW)입니다. 초과 매수 상태를 점검하세요."
 
     # 1. 분석 기준일 결정 (Read-only)
     db_max_ts = _get_db_max_date(shared_db)
@@ -1981,16 +2555,25 @@ def build_portfolio_dashboard(
 
     sector_frame, _ = _load_component_frame(max_symbols=0)
     universe = sector_frame["Symbol"].astype(str).tolist()
+    benchmark_frame, benchmark_component_source = _load_kospi200_benchmark_frame(shared_db=shared_db)
+    benchmark_symbols = benchmark_frame["Symbol"].astype(str).tolist() if not benchmark_frame.empty else universe
+    benchmark_sector_frame = benchmark_frame[["Symbol", "Sector"]].copy() if not benchmark_frame.empty else sector_frame
     benchmark_close, benchmark_caps, benchmark_sources = _load_close_history(
-        universe,
+        benchmark_symbols,
         start_date=start_ts.strftime("%Y-%m-%d"),
         end_date=end_ts.strftime("%Y-%m-%d"),
         shared_db=shared_db,
     )
+    explicit_benchmark_weights = (
+        benchmark_frame.set_index("Symbol")["benchmark_weight"]
+        if not benchmark_frame.empty and "benchmark_weight" in benchmark_frame.columns
+        else None
+    )
     benchmark_daily, sector_returns, benchmark_weights = _benchmark_series(
         close_history=benchmark_close,
         market_caps=benchmark_caps,
-        sector_frame=sector_frame,
+        sector_frame=benchmark_sector_frame,
+        benchmark_weights=explicit_benchmark_weights,
     )
     style_map, _, style_source = _build_style_map(universe, shared_db=shared_db, as_of_date=end_ts)
     positions["style_bucket"] = positions["ticker"].map(style_map).fillna("Unknown")
@@ -2000,7 +2583,7 @@ def build_portfolio_dashboard(
         close_history,
         benchmark_close,
         benchmark_weights,
-        sector_frame,
+        benchmark_sector_frame,
         style_map=style_map,
     )
     holding_returns = _holding_returns(close_history)
@@ -2011,7 +2594,7 @@ def build_portfolio_dashboard(
         positions,
         benchmark_weights,
         benchmark_close,
-        sector_frame,
+        benchmark_sector_frame,
         style_map=style_map,
     )
     factor_risk = _build_factor_risk(
@@ -2023,7 +2606,7 @@ def build_portfolio_dashboard(
         sector_returns,
         style_map=style_map,
     )
-    style_exposure = _build_style_exposure(positions, benchmark_weights, sector_frame, style_map=style_map)
+    style_exposure = _build_style_exposure(positions, benchmark_weights, benchmark_sector_frame, style_map=style_map)
 
     # --- 통합 스코어링 확장 로직 (KRX 전체 대상) ---
     sector_lookup = dict(zip(sector_frame["Symbol"], sector_frame["Sector"]))
@@ -2059,7 +2642,7 @@ def build_portfolio_dashboard(
     style_chart = _build_style_exposure_chart(style_exposure)
 
     # 1. 벤치마크 차트를 먼저 생성하여 기준이 되는 섹터 순서를 가져옵니다.
-    bench_alloc_chart, bench_order = _build_benchmark_sector_allocation_chart(benchmark_weights, sector_frame)
+    bench_alloc_chart, bench_order = _build_benchmark_sector_allocation_chart(benchmark_weights, benchmark_sector_frame)
     # 2. 내 포트폴리오 차트 생성 시 벤치마크의 정렬 순서를 주입합니다.
     alloc_chart = _build_sector_allocation_chart(positions, sector_order=bench_order)
 
@@ -2087,6 +2670,7 @@ def build_portfolio_dashboard(
         "portfolio_db": str(portfolio_db_path(portfolio_db).resolve()),
         "shared_db": str(_shared_db_path(shared_db).resolve()),
         "component_source": component_source,
+        "benchmark_component_source": benchmark_component_source,
         "price_source": position_sources.get("price_source", "sqlite"),
         "benchmark_price_source": benchmark_sources.get("price_source", "sqlite"),
         "financial_metric_source": financial_source,
@@ -2137,10 +2721,8 @@ def analyze_virtual_trade(
     lookback_days: int = DEFAULT_LOOKBACK_DAYS,
     forecast_horizon_days: int = DEFAULT_VIRTUAL_FORECAST_HORIZON_DAYS,
 ) -> VirtualTradeResult:
-    ticker_clean = str(ticker or "").strip().upper()
+    ticker_clean = resolve_security_symbol(ticker, shared_db=shared_db)
     side_clean = str(side or "").strip().upper()
-    if not ticker_clean:
-        raise ValueError("ticker must not be empty")
     if side_clean not in {"BUY", "SELL"}:
         raise ValueError("side must be BUY or SELL")
     qty_value = float(quantity)
@@ -2192,7 +2774,7 @@ def analyze_virtual_trade(
     cash_warning = ""
     cash_row_after = positions_after_raw[positions_after_raw["ticker"] == "CASH"]
     if not cash_row_after.empty and float(cash_row_after.iloc[0]["net_quantity"]) < 0:
-        cash_warning = f"가상 거래 경고: 실행 시 예상 현금 잔고가 마이너스(${abs(float(cash_row_after.iloc[0]['net_quantity'])):,.2f})가 됩니다."
+        cash_warning = f"가상 거래 경고: 실행 시 예상 현금 잔고가 마이너스({abs(float(cash_row_after.iloc[0]['net_quantity'])):,.0f} KRW)가 됩니다."
 
     portfolio_after = _portfolio_return_series(close_history, positions_after)
 
@@ -2293,9 +2875,23 @@ def build_portfolio_optimization(
     cash_buffer_pct: float = DEFAULT_CASH_BUFFER_PCT,
 ) -> OptimizationResult:
     dashboard = build_portfolio_dashboard(portfolio_db=portfolio_db, shared_db=shared_db, lookback_days=lookback_days)
-    sector_frame, component_source = _load_component_frame(max_symbols=max(int(universe_size), 20))
-    sector_lookup = dict(zip(sector_frame["Symbol"], sector_frame["Sector"]))
     current_symbols = set(dashboard.positions["ticker"].astype(str)) if not dashboard.positions.empty and "ticker" in dashboard.positions.columns else set()
+    benchmark_frame, benchmark_source = _load_kospi200_benchmark_frame(shared_db=shared_db, max_symbols=max(int(universe_size), 200))
+    if benchmark_frame.empty:
+        universe_basis, component_source = _load_component_frame(max_symbols=0)
+        component_source = f"{component_source}:sector_balanced"
+    else:
+        universe_basis = benchmark_frame.copy()
+        component_source = f"{benchmark_source}:sector_balanced"
+    cap_lookup = _latest_market_caps_for_symbols(universe_basis["Symbol"].astype(str).tolist(), shared_db=shared_db)
+    universe_basis["market_cap"] = universe_basis["Symbol"].astype(str).str.upper().map(cap_lookup).fillna(0.0)
+    sector_targets = _sector_target_weights(universe_basis)
+    sector_frame = _sector_balanced_universe(
+        universe_basis,
+        universe_size=max(int(universe_size), 1),
+        current_symbols=current_symbols,
+    )
+    sector_lookup = dict(zip(sector_frame["Symbol"], sector_frame["Sector"]))
     missing_symbols = {
         symbol
         for symbol in current_symbols
@@ -2305,6 +2901,11 @@ def build_portfolio_optimization(
         full_sector_frame, _ = _load_component_frame(max_symbols=0)
         full_sector_lookup = dict(zip(full_sector_frame["Symbol"], full_sector_frame["Sector"]))
         sector_lookup.update({symbol: full_sector_lookup[symbol] for symbol in missing_symbols if symbol in full_sector_lookup})
+        extras = full_sector_frame[full_sector_frame["Symbol"].isin(missing_symbols)].copy()
+        if not extras.empty:
+            extra_caps = _latest_market_caps_for_symbols(extras["Symbol"].astype(str).tolist(), shared_db=shared_db)
+            extras["market_cap"] = extras["Symbol"].map(extra_caps).fillna(0.0)
+            sector_frame = pd.concat([sector_frame, extras], ignore_index=True).drop_duplicates(subset=["Symbol"], keep="first")
     db_now = _get_db_max_date(shared_db)
     universe = sector_frame["Symbol"].astype(str).tolist()
     end_ts = db_now
@@ -2366,6 +2967,11 @@ def build_portfolio_optimization(
     current_weights = dashboard.positions.set_index("ticker")["portfolio_weight"] if not dashboard.positions.empty else pd.Series(dtype=float)
     current_shares = dashboard.positions.set_index("ticker")["net_quantity"] if not dashboard.positions.empty else pd.Series(dtype=float)
     price_map = close_history.ffill().iloc[-1].to_dict() if not close_history.empty else {}
+    allocation_candidates = sector_frame[sector_frame["Symbol"].isin(returns.columns)].copy()
+    allocation_candidates["price"] = allocation_candidates["Symbol"].map(price_map)
+    allocation_candidates["market_cap"] = allocation_candidates["Symbol"].map(latest_caps).fillna(
+        pd.to_numeric(allocation_candidates.get("market_cap"), errors="coerce").fillna(0.0)
+    )
 
     def _calc_port_impact(w_series: pd.Series):
         w_aligned = w_series.reindex(returns.columns).fillna(0.0)
@@ -2374,23 +2980,30 @@ def build_portfolio_optimization(
         p_vol = np.sqrt(w_aligned.T @ (returns.cov() * 252) @ w_aligned)
         return {"ret": p_ret * 100.0, "vol": p_vol * 100.0}
 
+    def _weights_from_allocation(df: pd.DataFrame) -> pd.Series:
+        if df.empty or "ticker" not in df.columns or "target_weight_pct" not in df.columns:
+            return pd.Series(dtype=float)
+        frame = df[df["ticker"].astype(str).str.upper().ne("CASH")].copy()
+        return pd.to_numeric(frame.set_index("ticker")["target_weight_pct"], errors="coerce").fillna(0.0) / 100.0
+
     curr_w_norm = (current_weights / 100.0).reindex(returns.columns).fillna(0.0)
     impact_curr = _calc_port_impact(curr_w_norm)
 
-    replication_weights, replication_summary = _apply_weight_constraints(
-        cap_weights,
-        sector_lookup=sector_lookup,
-        sector_cap_pct=sector_cap_pct,
-        max_position_pct=max_position_pct,
+    replication_shares, replication_summary = _build_share_targets(
+        allocation_candidates,
+        sector_targets=sector_targets,
+        total_portfolio_value=total_val,
         cash_buffer_pct=cash_buffer_pct,
+        max_position_pct=max_position_pct,
+        rank_signal=cap_weights,
     )
     def _finalize_opt_df(df: pd.DataFrame) -> pd.DataFrame:
         """현재 보유 종목과 최적화 제안 종목을 모두 포함하여 반환합니다."""
         if df.empty: return df
         return df.sort_values("target_weight_pct", ascending=False).reset_index(drop=True)
 
-    replication_all = _allocation_frame_from_weights(
-        replication_weights,
+    replication_all = _allocation_frame_from_share_targets(
+        replication_shares,
         sector_lookup=sector_lookup,
         annual_return=annual_return,
         annual_vol=annual_vol,
@@ -2401,18 +3014,19 @@ def build_portfolio_optimization(
         price_map=price_map,
     )
     replication = _finalize_opt_df(replication_all)
-    impact_rep = _calc_port_impact(replication_weights)
+    impact_rep = _calc_port_impact(_weights_from_allocation(replication))
 
     aggressive_signal = np.maximum(annual_return.fillna(0.0), 0.0) * (0.6 + score_map * 0.8) / annual_vol.replace(0.0, np.nan)
-    aggressive_weights, aggressive_summary = _apply_weight_constraints(
-        _normalize_weights(aggressive_signal.replace([np.inf, -np.inf], np.nan).fillna(0.0)),
-        sector_lookup=sector_lookup,
-        sector_cap_pct=sector_cap_pct,
-        max_position_pct=max_position_pct,
+    aggressive_shares, aggressive_summary = _build_share_targets(
+        allocation_candidates,
+        sector_targets=sector_targets,
+        total_portfolio_value=total_val,
         cash_buffer_pct=cash_buffer_pct,
+        max_position_pct=max_position_pct,
+        rank_signal=_normalize_weights(aggressive_signal.replace([np.inf, -np.inf], np.nan).fillna(0.0)),
     )
-    aggressive_all = _allocation_frame_from_weights(
-        aggressive_weights,
+    aggressive_all = _allocation_frame_from_share_targets(
+        aggressive_shares,
         sector_lookup=sector_lookup,
         annual_return=annual_return,
         annual_vol=annual_vol,
@@ -2423,18 +3037,19 @@ def build_portfolio_optimization(
         price_map=price_map,
     )
     aggressive = _finalize_opt_df(aggressive_all)
-    impact_agg = _calc_port_impact(aggressive_weights)
+    impact_agg = _calc_port_impact(_weights_from_allocation(aggressive))
 
     defensive_signal = (score_map + 0.35) / annual_vol.replace(0.0, np.nan)
-    defensive_weights, defensive_summary = _apply_weight_constraints(
-        _normalize_weights(defensive_signal.replace([np.inf, -np.inf], np.nan).fillna(0.0)),
-        sector_lookup=sector_lookup,
-        sector_cap_pct=sector_cap_pct,
-        max_position_pct=max_position_pct,
+    defensive_shares, defensive_summary = _build_share_targets(
+        allocation_candidates,
+        sector_targets=sector_targets,
+        total_portfolio_value=total_val,
         cash_buffer_pct=cash_buffer_pct,
+        max_position_pct=max_position_pct,
+        rank_signal=_normalize_weights(defensive_signal.replace([np.inf, -np.inf], np.nan).fillna(0.0)),
     )
-    defensive_all = _allocation_frame_from_weights(
-        defensive_weights,
+    defensive_all = _allocation_frame_from_share_targets(
+        defensive_shares,
         sector_lookup=sector_lookup,
         annual_return=annual_return,
         annual_vol=annual_vol,
@@ -2445,7 +3060,7 @@ def build_portfolio_optimization(
         price_map=price_map,
     )
     defensive = _finalize_opt_df(defensive_all)
-    impact_def = _calc_port_impact(defensive_weights)
+    impact_def = _calc_port_impact(_weights_from_allocation(defensive))
 
     impact_df = pd.DataFrame([
         {"구분": "기대 수익률(연 %)", "현재": impact_curr["ret"], "복제": impact_rep["ret"], "공격": impact_agg["ret"], "방어": impact_def["ret"]},

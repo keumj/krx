@@ -240,6 +240,20 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS index_constituent_history (
+            index_code TEXT NOT NULL,
+            as_of_date TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            member_order INTEGER,
+            source TEXT NOT NULL DEFAULT 'unknown',
+            notes TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (index_code, as_of_date, symbol)
+        )
+        """
+    )
 
     conn.execute("CREATE INDEX IF NOT EXISTS idx_securities_market_symbol ON securities(market, symbol)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_securities_sector ON securities(sector)")
@@ -255,6 +269,8 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_ingestion_runs_dataset_started_at ON ingestion_runs(dataset, started_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_benchmark_constituents_code_date ON benchmark_constituents(benchmark_code, as_of_date)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_benchmark_constituents_symbol ON benchmark_constituents(symbol)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_index_constituent_history_code_date ON index_constituent_history(index_code, as_of_date)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_index_constituent_history_symbol ON index_constituent_history(symbol)")
 
     conn.execute("DROP VIEW IF EXISTS news_articles_price_context")
     conn.execute(
@@ -765,6 +781,119 @@ def upsert_krx_benchmark_snapshot(
         )
         conn.commit()
         return int(conn.total_changes - before)
+
+
+def upsert_index_constituent_history(
+    frame: pd.DataFrame,
+    *,
+    index_code: str,
+    as_of_date: str,
+    source: str = "unknown",
+    db_path: Path | str | None = None,
+    shared_db_root: Path | str | None = None,
+) -> int:
+    if frame is None or frame.empty:
+        return 0
+
+    target = Path(db_path) if db_path is not None else krx_prices_sqlite_path(shared_db_root)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    normalized = frame.copy()
+    cols = {str(col).strip().lower(): col for col in normalized.columns}
+    symbol_col = cols.get("symbol")
+    if symbol_col is None:
+        raise ValueError("index constituent frame must include symbol column")
+
+    snapshot_date = _normalize_date_text(as_of_date)
+    if snapshot_date is None:
+        raise ValueError("as_of_date is required for index constituent history")
+
+    rows: list[tuple[object, ...]] = []
+    order_counter = 0
+    for record in normalized.to_dict(orient="records"):
+        symbol = _normalize_symbol(record.get(symbol_col))
+        if not symbol:
+            continue
+        order_counter += 1
+        rows.append(
+            (
+                _normalize_text(index_code) or index_code,
+                snapshot_date,
+                symbol,
+                int(_normalize_number(record.get(cols.get("member_order"))) or order_counter),
+                _normalize_text(record.get(cols.get("source"))) or source,
+                _normalize_text(record.get(cols.get("notes"))),
+            )
+        )
+
+    if not rows:
+        return 0
+
+    with _connect(target) as conn:
+        _ensure_schema(conn)
+        before = conn.total_changes
+        conn.executemany(
+            """
+            INSERT INTO index_constituent_history(
+                index_code, as_of_date, symbol, member_order, source, notes
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(index_code, as_of_date, symbol) DO UPDATE SET
+                member_order=excluded.member_order,
+                source=excluded.source,
+                notes=COALESCE(excluded.notes, index_constituent_history.notes)
+            """,
+            rows,
+        )
+        conn.commit()
+        return int(conn.total_changes - before)
+
+
+def load_latest_index_constituent_history(
+    index_code: str,
+    *,
+    db_path: Path | str | None = None,
+    shared_db_root: Path | str | None = None,
+) -> pd.DataFrame:
+    target = Path(db_path) if db_path is not None else krx_prices_sqlite_path(shared_db_root)
+    if not target.exists() or not target.is_file():
+        return pd.DataFrame()
+
+    with _connect(target) as conn:
+        _ensure_schema(conn)
+        latest_row = conn.execute(
+            """
+            SELECT MAX(as_of_date)
+            FROM index_constituent_history
+            WHERE index_code = ?
+            """,
+            (_normalize_text(index_code) or index_code,),
+        ).fetchone()
+        if latest_row is None or latest_row[0] is None:
+            return pd.DataFrame()
+        latest_as_of_date = str(latest_row[0])
+        return pd.read_sql_query(
+            """
+            SELECT
+                h.index_code,
+                h.as_of_date,
+                h.symbol,
+                s.market,
+                s.name_kr,
+                s.sector,
+                s.industry,
+                h.member_order,
+                h.source,
+                h.notes
+            FROM index_constituent_history AS h
+            LEFT JOIN securities AS s
+                ON s.symbol = h.symbol
+            WHERE h.index_code = ?
+              AND h.as_of_date = ?
+            ORDER BY h.member_order ASC, h.symbol ASC
+            """,
+            conn,
+            params=[_normalize_text(index_code) or index_code, latest_as_of_date],
+        )
 
 
 def load_latest_krx_benchmark_snapshot(

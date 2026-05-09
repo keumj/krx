@@ -15,6 +15,7 @@ except Exception:  # pragma: no cover - optional dependency
 from .db import (
     init_krx_project_db,
     load_latest_krx_benchmark_snapshot,
+    upsert_index_constituent_history,
     upsert_krx_benchmark_snapshot,
 )
 
@@ -36,6 +37,18 @@ class KRXBenchmarkSyncResult:
     constituent_count: int
     sqlite_path: Path
     export_csv_path: Path | None
+    source_mode: str
+
+
+@dataclass(frozen=True)
+class KRXIndexHistorySyncResult:
+    index_code: str
+    start_date: str
+    end_date: str
+    requested_days: int
+    stored_days: int
+    stored_rows: int
+    sqlite_path: Path
     source_mode: str
 
 
@@ -191,6 +204,85 @@ def _load_pykrx_index_constituents(*, as_of_date: str) -> pd.DataFrame:
     return frame
 
 
+def _date_range(start_date: str, end_date: str) -> list[str]:
+    start_ts = pd.Timestamp(start_date).normalize()
+    end_ts = pd.Timestamp(end_date).normalize()
+    if start_ts > end_ts:
+        raise ValueError("start_date must be on or before end_date")
+    return [ts.strftime("%Y-%m-%d") for ts in pd.date_range(start_ts, end_ts, freq="D")]
+
+
+def _latest_stored_index_history_date(conn: sqlite3.Connection, index_code: str) -> str | None:
+    row = conn.execute(
+        "SELECT MAX(as_of_date) FROM index_constituent_history WHERE index_code = ?",
+        (index_code,),
+    ).fetchone()
+    return _normalize_date_text(row[0] if row else None)
+
+
+def sync_kospi200_constituent_history(
+    *,
+    db_path: Path | str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    source_mode: str = "pykrx_index",
+    skip_empty: bool = True,
+) -> KRXIndexHistorySyncResult:
+    if source_mode != "pykrx_index":
+        raise ValueError("daily constituent history currently supports source_mode='pykrx_index' only")
+
+    sqlite_result = init_krx_project_db(db_path=Path(db_path) if db_path is not None else None)
+    with sqlite3.connect(sqlite_result.db_path) as conn:
+        final_end = _load_as_of_date(conn, end_date)
+        explicit_start = _normalize_date_text(start_date)
+        if explicit_start is not None:
+            final_start = explicit_start
+        else:
+            latest_stored = _latest_stored_index_history_date(conn, DEFAULT_BENCHMARK_CODE)
+            if latest_stored is not None:
+                final_start = (pd.Timestamp(latest_stored) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+            else:
+                final_start = final_end
+
+    dates = _date_range(final_start, final_end)
+    stored_rows = 0
+    stored_days = 0
+    for date_text in dates:
+        try:
+            frame = _load_pykrx_index_constituents(as_of_date=date_text)
+        except Exception as exc:
+            if skip_empty:
+                _log(f"Skipped {date_text}: {type(exc).__name__}: {exc}")
+                continue
+            raise
+        if frame.empty:
+            if skip_empty:
+                _log(f"Skipped {date_text}: empty constituent list")
+                continue
+            raise RuntimeError(f"empty constituent list for {date_text}")
+        changed = upsert_index_constituent_history(
+            frame,
+            index_code=DEFAULT_BENCHMARK_CODE,
+            as_of_date=date_text,
+            source=source_mode,
+            db_path=sqlite_result.db_path,
+        )
+        stored_rows += int(changed)
+        stored_days += 1
+        _log(f"Stored constituent list for {date_text}: rows={len(frame.index)}, changes={changed}")
+
+    return KRXIndexHistorySyncResult(
+        index_code=DEFAULT_BENCHMARK_CODE,
+        start_date=final_start,
+        end_date=final_end,
+        requested_days=len(dates),
+        stored_days=stored_days,
+        stored_rows=stored_rows,
+        sqlite_path=sqlite_result.db_path,
+        source_mode=source_mode,
+    )
+
+
 def _attach_latest_market_caps(
     conn: sqlite3.Connection,
     frame: pd.DataFrame,
@@ -332,8 +424,16 @@ def sync_kospi200_benchmark(
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build and store the KOSPI200 benchmark snapshot.")
+    parser.add_argument(
+        "--mode",
+        default="snapshot",
+        choices=["snapshot", "history"],
+        help="snapshot stores one weighted benchmark; history accumulates daily constituent lists only",
+    )
     parser.add_argument("--db-path", default="", help="Optional SQLite DB path override")
     parser.add_argument("--as-of-date", default="", help="Benchmark as-of date (YYYY-MM-DD)")
+    parser.add_argument("--start-date", default="", help="History mode start date (YYYY-MM-DD)")
+    parser.add_argument("--end-date", default="", help="History mode end date (YYYY-MM-DD)")
     parser.add_argument(
         "--source-mode",
         default=DEFAULT_SOURCE_MODE,
@@ -353,6 +453,21 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = _parse_args()
+    if str(args.mode).strip().lower() == "history":
+        result = sync_kospi200_constituent_history(
+            db_path=Path(args.db_path) if str(args.db_path).strip() else None,
+            start_date=str(args.start_date).strip() or None,
+            end_date=str(args.end_date).strip() or str(args.as_of_date).strip() or None,
+            source_mode=str(args.source_mode).strip() or DEFAULT_SOURCE_MODE,
+        )
+        _log(
+            f"Completed constituent history sync: code={result.index_code}, "
+            f"range={result.start_date}..{result.end_date}, "
+            f"requested_days={result.requested_days}, stored_days={result.stored_days}, "
+            f"stored_rows={result.stored_rows}"
+        )
+        return 0
+
     result = sync_kospi200_benchmark(
         db_path=Path(args.db_path) if str(args.db_path).strip() else None,
         as_of_date=str(args.as_of_date).strip() or None,

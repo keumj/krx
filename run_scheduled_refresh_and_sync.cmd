@@ -30,6 +30,14 @@ call ensure_lan_server.cmd >>"%LOG_FILE%" 2>&1
 call refresh_local_data.cmd 5 >>"%LOG_FILE%" 2>&1
 set "EXIT_CODE=%ERRORLEVEL%"
 
+echo.>>"%LOG_FILE%"
+echo ------------------------------------------------------------>>"%LOG_FILE%"
+echo [%date% %time%] KOSPI200 daily constituent history sync>>"%LOG_FILE%"
+echo ------------------------------------------------------------>>"%LOG_FILE%"
+"%PYTHON_EXE%" -m pipeline_krx.benchmark --mode history --source-mode pykrx_index --db-path data\krx_shared_db\krx_shared_prices.sqlite >>"%LOG_FILE%" 2>&1
+set "BENCHMARK_EXIT_CODE=%ERRORLEVEL%"
+echo [%date% %time%] KOSPI200 history sync finished with exit_code=%BENCHMARK_EXIT_CODE%>>"%LOG_FILE%"
+
 "%PYTHON_EXE%" scripts\record_refresh_state.py finished --source scheduled --exit-code %EXIT_CODE% >>"%LOG_FILE%" 2>&1
 
 if "%EXIT_CODE%"=="0" (

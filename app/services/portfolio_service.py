@@ -59,6 +59,51 @@ def _place_portfolio_description_before_nav(soup: BeautifulSoup) -> None:
         nav.insert_before(subtitle.extract())
 
 
+def _polish_data_entry_form(soup: BeautifulSoup) -> None:
+    stock_form = None
+    for form in soup.find_all("form", attrs={"method": "post", "action": "/run_add_trade"}):
+        ticker_field = form.find("input", attrs={"name": "ticker"})
+        if ticker_field is not None and str(ticker_field.get("value") or "").upper() != "CASH":
+            stock_form = form
+            break
+    if stock_form is not None:
+        ticker_field = stock_form.find("input", attrs={"name": "ticker"})
+        if ticker_field is not None:
+            ticker_field["placeholder"] = "삼성전자 또는 005930"
+            wrapper = ticker_field.find_parent("div")
+            label = wrapper.find("label") if wrapper is not None else None
+            if label is not None:
+                label.string = "종목명/코드"
+
+        price_field = stock_form.find("input", attrs={"name": "price"})
+        if price_field is not None:
+            price_field.attrs.pop("required", None)
+            price_field["placeholder"] = "비우면 종가"
+            wrapper = price_field.find_parent("div")
+            label = wrapper.find("label") if wrapper is not None else None
+            if label is not None:
+                label.string = "가격(KRW, 비우면 종가)"
+
+        note = stock_form.find_next_sibling("div", class_="db-note")
+        if note is not None:
+            note.string = "종목명은 shared DB의 종목코드로 변환해 저장합니다. 가격을 비우면 거래일 기준 최근 종가(KRW)를 사용합니다."
+
+    cash_form = None
+    for form in soup.find_all("form", attrs={"method": "post", "action": "/run_add_trade"}):
+        ticker_field = form.find("input", attrs={"name": "ticker", "value": "CASH"})
+        if ticker_field is not None:
+            cash_form = form
+            break
+    if cash_form is not None:
+        quantity_field = cash_form.find("input", attrs={"name": "quantity"})
+        if quantity_field is not None:
+            quantity_field["placeholder"] = "0"
+            wrapper = quantity_field.find_parent("div")
+            label = wrapper.find("label") if wrapper is not None else None
+            if label is not None:
+                label.string = "금액 (KRW)"
+
+
 @dataclass
 class PortfolioRange:
     lookback_days: int
@@ -96,6 +141,8 @@ def _prepare_portfolio_html(page: str, html: str, *, user: AuthUser | None = Non
         soup = BeautifulSoup(html, "html.parser")
     _remove_refresh_links(soup)
     _place_portfolio_description_before_nav(soup)
+    if page == "data-entry":
+        _polish_data_entry_form(soup)
     if soup is not None:
         html = str(soup)
     if page not in HISTORICAL_PAGES:
@@ -390,12 +437,13 @@ def render_page(
 
 def create_trade(form: dict[str, str], *, user: AuthUser | None = None) -> None:
     _require_user_for_remote_db(user)
+    price_raw = str(form.get("price", "") or "").strip()
     add_trade(
         trade_date=form.get("trade_date", ""),
         ticker=form.get("ticker", ""),
         side=form.get("side", ""),
         quantity=float(form.get("quantity", "0") or 0),
-        price=float(form.get("price", "0") or 0),
+        price=float(price_raw) if price_raw else None,
         fees=float(form.get("fees", "0") or 0),
         notes=form.get("notes", ""),
         db_path=_portfolio_db(user),

@@ -390,7 +390,7 @@ def _summary_metrics(dashboard: PortfolioDashboard | None) -> str:
         ("YTD", _fmt(row.get("portfolio_return_ytd_pct"), suffix="%")),
         ("20일 수익률", _fmt(row.get("portfolio_return_20d_pct"), suffix="%")),
         ("연율화 변동성", _fmt(row.get("portfolio_vol_annual_pct"), suffix="%")),
-        ("KRX 베타", _fmt(row.get("benchmark_beta"), 3)),
+        ("KOSPI200 베타", _fmt(row.get("benchmark_beta"), 3)),
     ]
     html_parts = []
     for label, value in items:
@@ -436,6 +436,35 @@ def _date_range_form(active: str, ctx: _PageContext) -> str:
 
 def _layout(title: str, subtitle: str, active: str, ctx: _PageContext, body: str, *, show_nav: bool = True) -> str:
     nav_html = _nav(active, ctx) if show_nav else ""
+    data_entry_script = """
+    <script>
+      document.addEventListener("DOMContentLoaded", function () {
+        document.querySelectorAll('form[action="/run_add_trade"]').forEach(function (form) {
+          var ticker = form.querySelector('input[name="ticker"]');
+          if (ticker && ticker.value !== "CASH") {
+            ticker.placeholder = "삼성전자 또는 005930";
+            var tickerLabel = ticker.closest("div") && ticker.closest("div").querySelector("label");
+            if (tickerLabel) tickerLabel.textContent = "종목명/코드";
+            var price = form.querySelector('input[name="price"]');
+            if (price) {
+              price.removeAttribute("required");
+              price.placeholder = "비우면 종가";
+              var priceLabel = price.closest("div") && price.closest("div").querySelector("label");
+              if (priceLabel) priceLabel.textContent = "가격(KRW, 비우면 종가)";
+            }
+          }
+          if (ticker && ticker.value === "CASH") {
+            var quantity = form.querySelector('input[name="quantity"]');
+            if (quantity) {
+              quantity.placeholder = "0";
+              var quantityLabel = quantity.closest("div") && quantity.closest("div").querySelector("label");
+              if (quantityLabel) quantityLabel.textContent = "금액 (KRW)";
+            }
+          }
+        });
+      });
+    </script>
+    """ if active == "data-entry" else ""
     return f"""
     <!doctype html>
     <html lang="ko">
@@ -452,6 +481,7 @@ def _layout(title: str, subtitle: str, active: str, ctx: _PageContext, body: str
         <div class="sub">{html.escape(subtitle)}</div>
         {body}
       </div>
+      {data_entry_script}
     </body>
     </html>
     """
@@ -502,7 +532,7 @@ def _data_entry_page(ctx: _PageContext) -> str:
               <option value="SELL">현금 출금 (Withdrawal)</option>
             </select>
           </div>
-          <div><label>금액 ($)</label><input type="number" min="0.01" step="0.01" name="quantity" required placeholder="0.00"></div>
+          <div><label>금액 (KRW)</label><input type="number" min="0.01" step="0.01" name="quantity" required placeholder="0"></div>
         </div>
         <div class="toolbar">
           <div style="flex:1;"><input type="text" name="notes" placeholder="입출금 사유 (예: 초기 자본, 추가 입금 등)"></div>
@@ -555,7 +585,7 @@ def _overview_page(ctx: _PageContext) -> str:
     {_date_range_form("overview", ctx)}
     {_summary_metrics(dashboard)}
     <div class="card" style="margin-top: 12px;">
-      <h3>섹터 배분 비교 (Portfolio vs KRX)</h3>
+      <h3>섹터 배분 비교 (Portfolio vs KOSPI200)</h3>
       <div class="grid-2">
         <div class="chart-card">
           {f'<img src="data:image/png;base64,{dashboard.sector_allocation_chart}" class="chart-img" style="max-width:600px; margin: 0 auto; display:block;" />' if dashboard and dashboard.sector_allocation_chart else "<p class='hint'>포트폴리오 배분 차트를 불러올 수 없습니다.</p>"}
@@ -589,7 +619,7 @@ def _attribution_page(ctx: _PageContext) -> str:
     {_message_block(ctx)}
     {_date_range_form("attribution", ctx)}
     <div class="card" style="margin-bottom: 12px;">
-      <h3>누적 수익률 추이 (vs KRX)</h3>
+      <h3>누적 수익률 추이 (vs KOSPI200)</h3>
       {f'<img src="data:image/png;base64,{dashboard.cumulative_chart}" class="chart-img" />' if dashboard and dashboard.cumulative_chart else "<p class='hint'>차트 데이터를 불러올 수 없습니다.</p>"}
     </div>
     <div class="grid-2" style="margin-bottom: 12px;">
@@ -1367,16 +1397,30 @@ def _format_opt_df(df: pd.DataFrame) -> pd.DataFrame:
         "volatility_pct": "변동(%)",
         "integrated_score": "점수"
     }
-    cols = ["ticker", "sector", "target_weight_pct", "current_weight_pct", "diff_weight_pct", "suggested_trade", "expected_return_pct", "volatility_pct", "integrated_score"]
+    cols = ["ticker", "sector", "target_shares", "current_shares", "share_delta", "target_amount", "target_weight_pct", "current_weight_pct", "diff_weight_pct", "suggested_trade", "expected_return_pct", "volatility_pct", "integrated_score"]
     out = df[[c for c in cols if c in df.columns]].copy()
     for c in out.columns:
         if c == "diff_weight_pct":
             out[c] = out[c].map(lambda x: f"{x:+.1f}" if pd.notna(x) else "-")
+        elif c == "share_delta":
+            out[c] = out[c].map(lambda x: f"{int(x):+d}" if pd.notna(x) else "-")
+        elif c in ["target_shares", "current_shares"]:
+            out[c] = out[c].map(lambda x: f"{int(x):,}" if pd.notna(x) else "-")
+        elif c == "target_amount":
+            out[c] = out[c].map(lambda x: f"{x:,.0f}" if pd.notna(x) else "-")
         elif c in ["target_weight_pct", "current_weight_pct", "expected_return_pct", "volatility_pct"]:
             out[c] = out[c].map(lambda x: f"{x:.1f}" if pd.notna(x) else "-")
         elif c == "integrated_score":
             out[c] = out[c].map(lambda x: f"{x:.0f}" if pd.notna(x) else "-")
-    return out.rename(columns=rename_map)
+    return out.rename(
+        columns={
+            **rename_map,
+            "target_shares": "목표 주식수",
+            "current_shares": "현재 주식수",
+            "share_delta": "매매 주식수",
+            "target_amount": "목표 금액",
+        }
+    )
 
 def _parse_lookback(raw: str | None) -> int:
     try:
@@ -1962,7 +2006,7 @@ def launch_web_gui(host: str = "localhost", port: int = 8515, open_browser: bool
                         ticker=form.get("ticker", ""),
                         side=form.get("side", ""),
                         quantity=float(form.get("quantity", "0") or 0),
-                        price=float(form.get("price", "0") or 0),
+                        price=float(form["price"]) if str(form.get("price", "")).strip() else None,
                         fees=float(form.get("fees", "0") or 0),
                         notes=form.get("notes", ""),
                     )
