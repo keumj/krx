@@ -7,10 +7,17 @@ from pathlib import Path
 
 import uvicorn
 
+try:
+    from dotenv import load_dotenv
+except Exception:  # pragma: no cover - optional dependency
+    load_dotenv = None
+
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+if load_dotenv is not None:
+    load_dotenv(ROOT / ".env")
 
 
 def _env_int(name: str, default: int) -> int:
