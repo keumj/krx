@@ -147,7 +147,7 @@ def index(request: Request, next: str | None = None, auth_error: str | None = No
       {auth_panel(next_url=next_url, user=user, error=error)}
     </div>
     """
-    return HTMLResponse(shell("Keumj Portfolio Lab", body, admin=bool(user and user.is_admin)))
+    return HTMLResponse(shell("Keumj KRX Lab", body, admin=bool(user and user.is_admin)))
 
 
 @router.get("/healthz")

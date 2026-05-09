@@ -39,7 +39,7 @@ def _auth_page(*, mode: str, next_url: str = "", error: str = "") -> str:
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>{title} | Keumj Portfolio Lab</title>
+  <title>{title} | Keumj KRX Lab</title>
   <style>
     * {{ box-sizing: border-box; }}
     body {{ margin: 0; min-height: 100vh; display: grid; place-items: center; background: #f5f7fa; color: #1f2937; font-family: "Segoe UI", "Noto Sans KR", sans-serif; }}

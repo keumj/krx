@@ -5,7 +5,7 @@ cd /d "%~dp0"
 
 if "%KEUMJM_ACCESS_MODE%"=="" set "KEUMJM_ACCESS_MODE=lan"
 if "%KEUMJM_HOST%"=="" set "KEUMJM_HOST=0.0.0.0"
-if "%KEUMJM_PORT%"=="" set "KEUMJM_PORT=8515"
+if "%KEUMJM_PORT%"=="" set "KEUMJM_PORT=8516"
 
 if "%KEUMJM_ENSURE_SERVER_DRY_RUN%"=="1" (
   echo Dry run: would ensure local FastAPI server on port %KEUMJM_PORT%.

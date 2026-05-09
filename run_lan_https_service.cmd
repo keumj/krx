@@ -2,9 +2,18 @@
 setlocal
 set PYTHONUTF8=1
 
+if exist ".env" (
+  for /f "usebackq tokens=1,* delims==" %%A in (".env") do (
+    if /i "%%A"=="KEUMJM_ACCESS_MODE" if "%KEUMJM_ACCESS_MODE%"=="" set "KEUMJM_ACCESS_MODE=%%B"
+    if /i "%%A"=="KEUMJM_HOST" if "%KEUMJM_HOST%"=="" set "KEUMJM_HOST=%%B"
+    if /i "%%A"=="KEUMJM_PORT" if "%KEUMJM_PORT%"=="" set "KEUMJM_PORT=%%B"
+    if /i "%%A"=="ENABLE_MACRO" if "%ENABLE_MACRO%"=="" set "ENABLE_MACRO=%%B"
+  )
+)
+
 if "%KEUMJM_ACCESS_MODE%"=="" set KEUMJM_ACCESS_MODE=lan
 if "%KEUMJM_HOST%"=="" set KEUMJM_HOST=0.0.0.0
-if "%KEUMJM_PORT%"=="" set KEUMJM_PORT=8515
+if "%KEUMJM_PORT%"=="" set KEUMJM_PORT=8516
 if "%ENABLE_MACRO%"=="" set ENABLE_MACRO=1
 if "%KEUMJM_AUTH_COOKIE_SECURE%"=="" set KEUMJM_AUTH_COOKIE_SECURE=1
 if "%KEUMJM_SSL_CERTFILE%"=="" set KEUMJM_SSL_CERTFILE=certs\keumjm-lan.crt

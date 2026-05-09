@@ -322,7 +322,7 @@ def shell(
 <body>
   <header class="service-top" style="{header_display}">
     <div class="service-top-inner">
-      <div class="service-brand" style="{brand_style}">Keumj Portfolio Lab</div>
+      <div class="service-brand" style="{brand_style}">Keumj KRX Lab</div>
       <nav class="service-nav" style="{top_nav_style}">{default_nav}</nav>
     </div>
   </header>

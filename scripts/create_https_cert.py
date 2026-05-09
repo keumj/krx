@@ -39,7 +39,7 @@ def create_cert(certfile: Path, keyfile: Path, days: int) -> None:
 
     subject = issuer = x509.Name(
         [
-            x509.NameAttribute(NameOID.COMMON_NAME, "Keumj Portfolio Lab LAN"),
+            x509.NameAttribute(NameOID.COMMON_NAME, "Keumj KRX Lab LAN"),
             x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Keumj Local"),
         ]
     )

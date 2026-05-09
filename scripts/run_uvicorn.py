@@ -41,7 +41,7 @@ def main() -> None:
     uvicorn.run(
         "app.main:app",
         host=os.getenv("KEUMJM_HOST", "0.0.0.0"),
-        port=_env_int("KEUMJM_PORT", 8515),
+        port=_env_int("KEUMJM_PORT", 8516),
         ssl_certfile=ssl_certfile,
         ssl_keyfile=ssl_keyfile,
         timeout_keep_alive=_env_int("KEUMJM_UVICORN_KEEP_ALIVE", 30),

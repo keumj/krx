@@ -44,9 +44,9 @@ def _env_first(*names: str, default: str = "") -> str:
 
 @dataclass(frozen=True)
 class Settings:
-    app_name: str = "Keumjm Portfolio Lab"
+    app_name: str = "Keumj KRX Lab"
     host: str = os.getenv("KEUMJM_HOST", "0.0.0.0")
-    port: int = int(os.getenv("KEUMJM_PORT", "8515"))
+    port: int = int(os.getenv("KEUMJM_PORT", "8516"))
     project_root: Path = Path(__file__).resolve().parents[1]
     access_mode: str = os.getenv("KEUMJM_ACCESS_MODE", "lan").strip().lower()
     allowed_cidrs: tuple[str, ...] = _env_list("KEUMJM_ALLOWED_CIDRS")

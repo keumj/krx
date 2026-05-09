@@ -38,7 +38,7 @@ Import-DotEnvFile
 if (-not $env:PYTHONUTF8) { $env:PYTHONUTF8 = "1" }
 if (-not $env:KEUMJM_ACCESS_MODE) { $env:KEUMJM_ACCESS_MODE = "lan" }
 if (-not $env:KEUMJM_HOST) { $env:KEUMJM_HOST = "0.0.0.0" }
-if (-not $env:KEUMJM_PORT) { $env:KEUMJM_PORT = "8515" }
+if (-not $env:KEUMJM_PORT) { $env:KEUMJM_PORT = "8516" }
 if (-not $env:KEUMJM_AUTH_ENABLED) { $env:KEUMJM_AUTH_ENABLED = "0" }
 if (-not $env:ENABLE_MACRO) { $env:ENABLE_MACRO = "1" }
 
