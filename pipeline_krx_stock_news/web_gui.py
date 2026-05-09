@@ -78,7 +78,7 @@ def _nav(active: str) -> str:
         ("overview", "/overview", "뉴스 개요"),
         ("event", "/event-study", "이벤트 스터디"),
         ("spillover", "/sector-spillover", "섹터 전이"),
-        ("divergence", "/divergence", "뉴스-프라이스 다이버전스"),
+        ("divergence", "/divergence", "뉴스-가격 다이버전스"),
         ("expectation", "/expectation-reset", "기대 리셋"),
         ("volatility", "/volatility-regime", "변동성 레짐"),
         ("topics", "/topic-modeling", "토픽 모델링"),
@@ -295,13 +295,13 @@ def _analysis_card(
 def _overview_interpretation(dashboard: StockNewsDashboard) -> str:
     overview = dashboard.overview
     if overview.article_count == 0:
-        return _analysis_card("결과 해석", [("핵심 관찰", "현재 조건에서 집계된 뉴스가 없어 개요를 만들 수 없습니다.")], signal_label="중립", signal_tone="neutral")
-    observation = f"현재 조건에서는 뉴스 {overview.article_count:,d}건이 잡혔고, {overview.unique_ticker_count:,d}개 티커와 {overview.unique_source_count:,d}개 소스를 커버합니다. 최신 기사는 {_safe_str(overview.latest_publish_at)} 시각 기준입니다."
-    opportunity = "이 페이지는 계산형 신호를 보기 전, 어디에 뉴스가 집중되는지 빠르게 잡아내는 출발점으로 읽으면 좋습니다."
-    caution = "단순 기사 수는 방향성을 뜻하지 않으므로, 언급량이 높다고 바로 강세 신호로 해석하기보다 이후 계산형 페이지에서 반응을 확인하는 편이 안전합니다."
+        return _analysis_card("결과 해석", [("핵심 관찰", "현재 조건에서 집계할 뉴스가 없어 개요를 만들 수 없습니다.")], signal_label="중립", signal_tone="neutral")
+    observation = f"현재 조건에서 뉴스 {overview.article_count:,d}건, 티커 {overview.unique_ticker_count:,d}개, 소스 {overview.unique_source_count:,d}개를 확인했습니다. 최신 기사는 {_safe_str(overview.latest_publish_at)} 기준입니다."
+    opportunity = "뉴스가 어디에 집중되는지 빠르게 훑고, 세부 분석 페이지에서 우선 확인할 후보를 고르는 출발점으로 쓰기 좋습니다."
+    caution = "기사 수는 관심도의 단서일 뿐 방향성을 바로 보장하지 않습니다. 가격 반응과 섹터 흐름은 별도 페이지에서 함께 확인해야 합니다."
     if not overview.top_tickers.empty:
         top = overview.top_tickers.iloc[0]
-        opportunity = f"가장 많이 언급된 티커는 {_safe_str(top.get('ticker'))}이며 기사 {_safe_str(top.get('article_count'))}건입니다. 뉴스 편중이 큰 종목은 이후 이벤트·괴리 페이지에서 우선 점검할 후보로 볼 만합니다."
+        opportunity = f"가장 많이 언급된 티커는 {_safe_str(top.get('ticker'))}이고 기사 수는 {_safe_str(top.get('article_count'))}건입니다. 이벤트 스터디나 다이버전스 분석의 우선 후보로 볼 만합니다."
     if not overview.top_sectors.empty and not overview.top_sources.empty:
         top_sector = overview.top_sectors.iloc[0]
         top_source = overview.top_sources.iloc[0]
@@ -315,22 +315,22 @@ def _overview_interpretation(dashboard: StockNewsDashboard) -> str:
         prior = int(counts.iloc[7:14].sum()) if len(counts) > 7 else 0
         if prior > 0:
             direction = "증가" if recent > prior else "감소" if recent < prior else "유지"
-            caution = f"최근 7일 기사 수는 직전 7일 대비 {direction} 흐름입니다. 최근 7일 {recent:,d}건, 직전 7일 {prior:,d}건으로 뉴스 유입 강도는 읽을 수 있지만, 방향성은 별도 검증이 필요합니다."
+            caution = f"최근 7일 기사 수는 직전 7일 대비 {direction} 흐름입니다. 최근 7일 {recent:,d}건, 직전 7일 {prior:,d}건으로 뉴스 유입 강도는 참고할 수 있지만 방향성은 별도 검증이 필요합니다."
         else:
-            caution = f"집계 기간이 짧거나 최근 구간 중심으로 데이터가 몰려 있어 최근 7일 기사 {recent:,d}건 중심 해석이 적절합니다. 기간이 짧을수록 일시적 뉴스 급증에 흔들릴 수 있습니다."
+            caution = f"집계 기간이 짧거나 최근 구간에 데이터가 몰려 있어 최근 7일 {recent:,d}건 중심으로 해석하는 편이 적절합니다."
     return _analysis_card("결과 해석", [("핵심 관찰", observation), ("기회 요인", opportunity), ("주의 요인", caution)], signal_label="중립", signal_tone="neutral")
 
 
 def _event_interpretation(dashboard: StockNewsDashboard) -> str:
     result = dashboard.event_study
     if result.summary.empty:
-        return _analysis_card("결과 해석", [("핵심 관찰", "매치된 이벤트 뉴스가 부족해 통계적으로 읽을 수 있는 패턴이 아직 없습니다."), ("기회 요인", "키워드 범위를 넓히거나 조회 기간을 늘리면 샘플을 확보할 수 있습니다."), ("주의 요인", "표본이 적을 때는 평균 수익률이 쉽게 왜곡될 수 있습니다.")], signal_label="중립", signal_tone="neutral")
+        return _analysis_card("결과 해석", [("핵심 관찰", "매칭된 이벤트 뉴스가 부족해 통계적으로 읽을 만한 패턴이 아직 없습니다."), ("기회 요인", "키워드 범위를 넓히거나 조회 기간을 늘리면 표본이 보강될 수 있습니다."), ("주의 요인", "표본이 작을 때는 평균 수익률이 크게 흔들릴 수 있습니다.")], signal_label="중립", signal_tone="neutral")
     summary = result.summary.sort_values("day").reset_index(drop=True)
     last_row = summary.iloc[-1]
     strongest = summary.iloc[summary["mean_return_pct"].abs().idxmax()]
-    observation = f"이번 실행에서는 이벤트 뉴스 {result.article_count:,d}건이 매치됐고, {result.matched_ticker_count:,d}개 티커에서 후속 반응을 추적했습니다. 최종 Day {int(last_row['day'])} 기준 평균 수익률은 {_format_pct(last_row['mean_return_pct'], signed=True)}, 중앙값은 {_format_pct(last_row['median_return_pct'], signed=True)}, 상승 비율은 {_format_pct(last_row['positive_ratio_pct'])}입니다."
-    opportunity = f"가장 강한 평균 반응은 Day {int(strongest['day'])}에서 {_format_pct(strongest['mean_return_pct'], signed=True)}로 나타났습니다. 특정 시차에서 반응이 집중된다면 해당 기간을 중심으로 후속 모니터링 포인트를 잡을 수 있습니다."
-    caution = f"강한 반응 구간의 t-stat은 {_format_metric(strongest.get('t_stat'))}입니다. 절대값이 낮으면 방향성은 보여도 신뢰도는 약할 수 있으니 평균 수치만으로 단정하지 않는 편이 좋습니다."
+    observation = f"이번 실행에서 이벤트 뉴스 {result.article_count:,d}건이 매칭됐고, {result.matched_ticker_count:,d}개 티커의 후속 반응을 추적했습니다. 최종 Day {int(last_row['day'])} 기준 평균 수익률은 {_format_pct(last_row['mean_return_pct'], signed=True)}, 중앙값은 {_format_pct(last_row['median_return_pct'], signed=True)}, 상승 비율은 {_format_pct(last_row['positive_ratio_pct'])}입니다."
+    opportunity = f"가장 강한 평균 반응은 Day {int(strongest['day'])}에서 {_format_pct(strongest['mean_return_pct'], signed=True)}로 나타났습니다. 특정 시차에 반응이 몰리면 해당 기간을 중심으로 후속 모니터링 사인을 만들 수 있습니다."
+    caution = f"해당 구간 t-stat은 {_format_metric(strongest.get('t_stat'))}입니다. 평균 수치만으로 판단하기보다 표본 수와 상승 비율을 함께 봐야 합니다."
     signal_label = "강세" if float(last_row["mean_return_pct"]) > 0.5 and float(last_row["positive_ratio_pct"]) >= 55.0 else "경계" if float(last_row["mean_return_pct"]) < -0.5 and float(last_row["positive_ratio_pct"]) <= 45.0 else "중립"
     signal_tone = "bullish" if signal_label == "강세" else "caution" if signal_label == "경계" else "neutral"
     return _analysis_card("결과 해석", [("핵심 관찰", observation), ("기회 요인", opportunity), ("주의 요인", caution)], signal_label=signal_label, signal_tone=signal_tone)
@@ -339,14 +339,14 @@ def _event_interpretation(dashboard: StockNewsDashboard) -> str:
 def _spillover_interpretation(dashboard: StockNewsDashboard) -> str:
     result = dashboard.sector_spillover
     if result.summary.empty:
-        return _analysis_card("결과 해석", [("핵심 관찰", "같은 섹터 peer로 번지는 수익률 패턴이 확인되지 않았습니다."), ("기회 요인", "섹터 구성이 풍부한 티커나 더 넓은 기간으로 다시 보면 전이 효과가 드러날 수 있습니다."), ("주의 요인", "peer 수가 적거나 이벤트 수가 부족하면 전이 결과는 쉽게 비어 있을 수 있습니다.")], signal_label="중립", signal_tone="neutral")
+        return _analysis_card("결과 해석", [("핵심 관찰", "같은 섹터의 비교 종목으로 번지는 수익률 패턴을 아직 확인하지 못했습니다."), ("기회 요인", "섹터 구성 티커가 많은 구간이나 더 긴 기간으로 다시 보면 전이 효과가 드러날 수 있습니다."), ("주의 요인", "비교 종목 수나 이벤트 수가 부족하면 결과가 쉽게 치우칠 수 있습니다.")], signal_label="중립", signal_tone="neutral")
     summary = result.summary.reset_index(drop=True)
     top = summary.iloc[0]
     col = "peer_day_5_return_pct" if "peer_day_5_return_pct" in summary.columns else summary.columns[-1]
     positive_count = int((pd.to_numeric(summary[col], errors="coerce") > 0).sum())
-    observation = f"가장 강한 섹터 전이는 {_safe_str(top.get('sector'))}에서 관찰됐고, 최종 peer 평균 수익률은 {_format_pct(top.get(col), signed=True)}입니다. 평균 peer 수는 {_format_metric(top.get('avg_peer_count'))}개, 이벤트 수는 {_safe_str(top.get('event_count'))}건입니다."
-    opportunity = f"상위 섹터 {len(summary.index):,d}개 중 {positive_count:,d}개가 플러스 방향이었습니다. 개별 뉴스가 업종 공통 기대를 움직이는 구간이라면 섹터 단위 확산을 추적하는 단서가 됩니다."
-    caution = "전이 결과는 개별 종목 뉴스가 업종 전체에 번졌는지만 보여주며, 실제 매매에는 업종 내 편차와 source ticker 주도의 일시 효과를 함께 걸러봐야 합니다."
+    observation = f"가장 강한 섹터 전이는 {_safe_str(top.get('sector'))}에서 관찰됐고, 최종 비교 종목 평균 수익률은 {_format_pct(top.get(col), signed=True)}입니다. 평균 비교 종목 수는 {_format_metric(top.get('avg_peer_count'))}개, 이벤트 수는 {_safe_str(top.get('event_count'))}건입니다."
+    opportunity = f"상위 섹터 {len(summary.index):,d}개 중 {positive_count:,d}개가 양의 방향이었습니다. 개별 뉴스가 업종 공통 기대를 움직이는 구간이라면 섹터 단위 확산을 추적할 단서가 됩니다."
+    caution = "전이 결과는 개별 종목 뉴스가 업종 전체로 번지는지만 보여줍니다. 실제 매매 판단에는 주도 티커, 비교 종목 수, 일시 효과를 함께 걸러야 합니다."
     top_value = float(pd.to_numeric(pd.Series([top.get(col)]), errors="coerce").fillna(0).iloc[0])
     signal_label = "강세" if top_value > 0.5 and positive_count >= max(1, len(summary.index) // 2) else "경계" if top_value < -0.5 else "중립"
     signal_tone = "bullish" if signal_label == "강세" else "caution" if signal_label == "경계" else "neutral"
@@ -356,13 +356,13 @@ def _spillover_interpretation(dashboard: StockNewsDashboard) -> str:
 def _divergence_interpretation(dashboard: StockNewsDashboard) -> str:
     alerts = dashboard.divergence.alerts
     if alerts.empty:
-        return _analysis_card("결과 해석", [("핵심 관찰", "강한 뉴스 감성과 실제 가격 반응이 크게 어긋난 사례가 이번 조건에서는 잡히지 않았습니다."), ("기회 요인", "시장 반응이 비교적 정직한 구간일 수 있어 이벤트 스터디 쪽 해석이 더 유효할 수 있습니다."), ("주의 요인", "괴리가 없다는 뜻이지 기회가 없다는 뜻은 아니며, 단기 반응만으로 시장 효율성을 단정하면 안 됩니다.")], signal_label="중립", signal_tone="neutral")
+        return _analysis_card("결과 해석", [("핵심 관찰", "뉴스 감성과 실제 가격 반응이 크게 엇갈린 사례가 이번 조건에서는 잡히지 않았습니다."), ("기회 요인", "시장 반응이 비정상적으로 늦는 구간에서는 다이버전스 신호가 유용할 수 있습니다."), ("주의 요인", "알림이 없다는 뜻이 곧 기회가 없다는 뜻은 아닙니다. 가격 구간과 거래량도 함께 봐야 합니다.")], signal_label="중립", signal_tone="neutral")
     top = alerts.iloc[0]
     positive_news_fade = int(((pd.to_numeric(alerts["effective_sentiment"], errors="coerce") > 0) & (pd.to_numeric(alerts["divergence_return_pct"], errors="coerce") < 0)).sum())
     negative_news_absorb = int(((pd.to_numeric(alerts["effective_sentiment"], errors="coerce") < 0) & (pd.to_numeric(alerts["divergence_return_pct"], errors="coerce") > 0)).sum())
-    observation = f"가장 강한 괴리 사례는 {_safe_str(top.get('ticker'))}이며, 감성 점수 {_format_metric(top.get('effective_sentiment'))} 대비 실제 가격 반응은 {_format_pct(top.get('divergence_return_pct'), signed=True)}로 반대로 움직였습니다. 가장 큰 반전은 Day {_safe_str(top.get('divergence_horizon_days'))}에서 나타났습니다."
-    opportunity = f"괴리 상위 {len(alerts.index):,d}건 중 긍정 뉴스 후 하락은 {positive_news_fade:,d}건, 부정 뉴스 후 방어는 {negative_news_absorb:,d}건입니다. 과열 기대의 되돌림인지, 악재 소화인지 구분하면 후행 재평가 후보를 좁히는 데 도움이 됩니다."
-    caution = "괴리는 강한 제목과 실제 가격이 엇갈렸다는 뜻일 뿐, 즉시 반대로 베팅하라는 신호는 아닙니다. 펀더멘털 변화나 이미 선반영된 포지션 해소도 함께 봐야 합니다."
+    observation = f"가장 강한 관리 사례는 {_safe_str(top.get('ticker'))}이며, 감성 점수 {_format_metric(top.get('effective_sentiment'))} 대비 실제 가격 반응은 {_format_pct(top.get('divergence_return_pct'), signed=True)}입니다. 가장 큰 반전은 Day {_safe_str(top.get('divergence_horizon_days'))}에서 나타났습니다."
+    opportunity = f"관리 상위 {len(alerts.index):,d}건 중 긍정 뉴스 후 하락은 {positive_news_fade:,d}건, 부정 뉴스 후 방어는 {negative_news_absorb:,d}건입니다. 과열 기대의 되돌림인지, 악재 소화인지 구분하는 후보군으로 쓸 수 있습니다."
+    caution = "강한 다이버전스가 곧 반대 방향 베팅 신호는 아닙니다. 거래대금 변화나 이미 알려진 재료 소화를 함께 확인해야 합니다."
     top_score = float(pd.to_numeric(pd.Series([top.get("divergence_score")]), errors="coerce").fillna(0).iloc[0])
     signal_label = "경계" if top_score >= 4.0 else "중립"
     signal_tone = "caution" if signal_label == "경계" else "neutral"
@@ -372,13 +372,13 @@ def _divergence_interpretation(dashboard: StockNewsDashboard) -> str:
 def _expectation_interpretation(dashboard: StockNewsDashboard) -> str:
     candidates = dashboard.expectation_reset.candidates
     if candidates.empty:
-        return _analysis_card("결과 해석", [("핵심 관찰", "강한 뉴스 대비 반응이 약한 리셋 후보가 잡히지 않았습니다."), ("기회 요인", "이번 구간은 뉴스 기대가 가격에 비교적 자연스럽게 반영됐을 가능성이 큽니다."), ("주의 요인", "리셋 후보 부재가 곧 가격 효율성을 뜻하지는 않으므로 기간과 임계값을 바꿔 다시 확인할 필요가 있습니다.")], signal_label="중립", signal_tone="neutral")
+        return _analysis_card("결과 해석", [("핵심 관찰", "강한 뉴스 대비 반응이 약한 기대 리셋 후보가 아직 없습니다."), ("기회 요인", "이번 구간은 뉴스 기대가 가격에 자연스럽게 반영됐을 가능성이 있습니다."), ("주의 요인", "후보가 부족하다는 것이 곧 가격 효율성을 보장하지는 않습니다. 기간과 임계값을 바꿔 다시 확인할 수 있습니다.")], signal_label="중립", signal_tone="neutral")
     top = candidates.iloc[0]
     reset_counts = candidates["reset_type"].astype(str).value_counts()
     dominant_type = reset_counts.index[0] if not reset_counts.empty else "-"
-    observation = f"가장 강한 리셋 후보는 {_safe_str(top.get('ticker'))}이며 유형은 {_safe_str(top.get('reset_type'))}, 점수는 {_format_metric(top.get('reset_score'))}입니다. 감성은 {_format_metric(top.get('effective_sentiment'))}였지만 5일 수익률은 {_format_pct(top.get('day_5_return_pct'), signed=True)}에 그쳤습니다."
-    opportunity = f"후보 {len(candidates.index):,d}건 중 가장 많이 나온 패턴은 {_safe_str(dominant_type)}입니다. 강한 뉴스에도 후속 반응이 둔하면, 기대가 이미 가격에 반영된 종목을 골라내는 데 유용합니다."
-    caution = "이 결과는 저평가 탐지라기보다 기대 소진 여부를 보는 도구입니다. headline이 좋아 보여도 추가 상승 여력이 작을 수 있다는 점을 먼저 의심하는 편이 좋습니다."
+    observation = f"가장 강한 리셋 후보는 {_safe_str(top.get('ticker'))}이고 유형은 {_safe_str(top.get('reset_type'))}, 점수는 {_format_metric(top.get('reset_score'))}입니다. 감성 점수는 {_format_metric(top.get('effective_sentiment'))}인데 5일 수익률은 {_format_pct(top.get('day_5_return_pct'), signed=True)}에 그쳤습니다."
+    opportunity = f"후보 {len(candidates.index):,d}건 중 가장 많이 나온 패턴은 {_safe_str(dominant_type)}입니다. 강한 뉴스에도 후속 반응이 둔하면 기대가 이미 가격에 반영된 종목을 거르는 데 도움이 됩니다."
+    caution = "이 결과는 저평가 신호라기보다 기대 소진 여부를 보는 도구입니다. 좋은 제목만 보고 추가 상승 여력이 크다고 단정하지 않는 편이 좋습니다."
     top_score = float(pd.to_numeric(pd.Series([top.get("reset_score")]), errors="coerce").fillna(0).iloc[0])
     signal_label = "경계" if top_score >= 2.0 else "중립"
     signal_tone = "caution" if signal_label == "경계" else "neutral"
@@ -388,13 +388,13 @@ def _expectation_interpretation(dashboard: StockNewsDashboard) -> str:
 def _volatility_interpretation(dashboard: StockNewsDashboard) -> str:
     result = dashboard.volatility_regime
     if result.summary.empty:
-        return _analysis_card("결과 해석", [("핵심 관찰", "뉴스 이후 변동성이 뚜렷하게 재구성된 사례가 부족합니다."), ("기회 요인", "거래일이 더 쌓이면 변동성 레짐 변화가 더 분명해질 수 있습니다."), ("주의 요인", "기준 기간과 이후 기간이 짧으면 변동성 비율은 쉽게 흔들릴 수 있습니다.")], signal_label="중립", signal_tone="neutral")
+        return _analysis_card("결과 해석", [("핵심 관찰", "뉴스 이후 변동성이 선명하게 재구성된 사례가 부족합니다."), ("기회 요인", "거래일을 더 넓히면 변동성 레짐 변화가 더 분명해질 수 있습니다."), ("주의 요인", "기준 기간과 사후 기간이 짧으면 변동성 비율이 크게 흔들릴 수 있습니다.")], signal_label="중립", signal_tone="neutral")
     summary = result.summary.reset_index(drop=True)
     top = summary.iloc[0]
     expansion_count = int((pd.to_numeric(summary["avg_volatility_ratio"], errors="coerce") > 1.0).sum())
-    observation = f"가장 강한 변동성 확대 종목은 {_safe_str(top.get('ticker'))}이며 평균 변동성 비율은 {_format_metric(top.get('avg_volatility_ratio'))}배입니다. 기준 변동성은 {_format_pct(top.get('avg_baseline_vol_pct'))}, 이후 변동성은 {_format_pct(top.get('avg_post_vol_pct'))}였습니다."
-    opportunity = f"상위 요약 {len(summary.index):,d}개 중 {expansion_count:,d}개가 1배를 넘었습니다. 뉴스 이후 가격 분산이 커진 종목은 방향성보다 트레이딩 레인지 확대 관점에서 볼 만합니다."
-    caution = "변동성 확대는 기회이면서 동시에 리스크입니다. 수익률 신호가 아니라 포지션 관리 난도 신호에 가깝기 때문에 손절·보유 기간 가정을 같이 조정해야 합니다."
+    observation = f"가장 강한 변동성 확대 종목은 {_safe_str(top.get('ticker'))}이고 평균 변동성 비율은 {_format_metric(top.get('avg_volatility_ratio'))}배입니다. 기준 변동성은 {_format_pct(top.get('avg_baseline_vol_pct'))}, 사후 변동성은 {_format_pct(top.get('avg_post_vol_pct'))}였습니다."
+    opportunity = f"상위 요약 {len(summary.index):,d}개 중 {expansion_count:,d}개가 1배를 넘었습니다. 뉴스 이후 가격 분산이 커진 종목은 방향성보다 트레이딩 레인지 관점에서 볼 만합니다."
+    caution = "변동성 확대는 기회이면서 동시에 리스크입니다. 수익률 신호가 아니므로 손절과 보유 기간 가정을 함께 조정해야 합니다."
     top_ratio = float(pd.to_numeric(pd.Series([top.get("avg_volatility_ratio")]), errors="coerce").fillna(0).iloc[0])
     signal_label = "경계" if top_ratio > 1.25 else "중립"
     signal_tone = "caution" if signal_label == "경계" else "neutral"
@@ -404,13 +404,13 @@ def _volatility_interpretation(dashboard: StockNewsDashboard) -> str:
 def _topics_interpretation(dashboard: StockNewsDashboard) -> str:
     topics = dashboard.topics.topics
     if topics.empty:
-        return _analysis_card("결과 해석", [("핵심 관찰", "제목을 묶을 만큼 반복 출현한 단어가 아직 부족해 토픽 클러스터를 만들지 못했습니다."), ("기회 요인", "기간을 늘리거나 키워드 제한을 풀면 시장 서사가 더 잘 드러날 수 있습니다."), ("주의 요인", "짧은 기간의 토픽은 일시적 이슈에 크게 좌우될 수 있습니다.")], signal_label="중립", signal_tone="neutral")
+        return _analysis_card("결과 해석", [("핵심 관찰", "제목을 묶을 만큼 반복해서 등장한 단어가 아직 부족해 토픽 클러스터를 만들지 못했습니다."), ("기회 요인", "기간을 늘리거나 키워드 제한을 풀면 시장 테마가 더 잘 드러날 수 있습니다."), ("주의 요인", "짧은 기간의 토픽은 일시적인 뉴스 이벤트에 크게 좌우될 수 있습니다.")], signal_label="중립", signal_tone="neutral")
     top = topics.iloc[0]
     cloud = dashboard.topics.word_cloud
     lead_terms = ", ".join(cloud.head(5)["term"].astype(str).tolist()) if not cloud.empty else _safe_str(top.get("top_terms"))
-    observation = f"가장 큰 토픽은 T{int(top['topic_id'])}이며 비중은 {_format_pct(top.get('topic_weight_pct'))}, 기사 수는 {_safe_str(top.get('headline_count'))}건입니다. 대표 헤드라인은 '{_safe_str(top.get('sample_headline'))}'입니다."
-    opportunity = f"핵심 단어는 {lead_terms}입니다. 이 단어들이 반복될수록 최근 뉴스 흐름의 중심 서사를 먼저 파악한 뒤 관련 계산형 신호를 연결해서 볼 수 있습니다."
-    caution = "토픽 비중은 관심의 크기를 말해줄 뿐 수익 방향을 보장하지 않습니다. 높은 비중의 테마라도 실제 가격 반응은 이벤트·괴리 페이지에서 따로 검증하는 편이 좋습니다."
+    observation = f"가장 큰 토픽은 T{int(top['topic_id'])}이고 비중은 {_format_pct(top.get('topic_weight_pct'))}, 기사 수는 {_safe_str(top.get('headline_count'))}건입니다. 대표 헤드라인은 '{_safe_str(top.get('sample_headline'))}'입니다."
+    opportunity = f"핵심 단어는 {lead_terms}입니다. 반복되는 단어를 통해 최근 뉴스 흐름의 중심 주제를 먼저 파악할 수 있습니다."
+    caution = "토픽 비중은 관심의 크기를 말해줄 뿐 수익률 방향을 보장하지 않습니다. 높은 비중의 테마도 가격 반응은 별도로 검증해야 합니다."
     top_weight = float(pd.to_numeric(pd.Series([top.get("topic_weight_pct")]), errors="coerce").fillna(0).iloc[0])
     signal_label = "강세" if top_weight >= 35.0 else "중립"
     signal_tone = "bullish" if signal_label == "강세" else "neutral"
@@ -562,7 +562,7 @@ def _expectation_reset_chart(dashboard: StockNewsDashboard) -> str:
 def _word_cloud_html(dashboard: StockNewsDashboard) -> str:
     cloud = dashboard.topics.word_cloud
     if cloud.empty:
-        return "<p class='hint'>키워드 클라우드를 만들 데이터가 부족합니다.</p>"
+        return "<p class='hint'>워드 클라우드를 만들 데이터가 부족합니다.</p>"
     max_weight = float(cloud["weight"].max()) if not cloud.empty else 1.0
     parts = ["<div class='word-cloud'>"]
     for row in cloud.itertuples(index=False):
@@ -577,10 +577,10 @@ def _summary_metrics(ctx: _PageContext) -> str:
     if dashboard is None:
         return ""
     metrics = [
-        ("적용 키워드", ", ".join(dashboard.applied_keywords) if dashboard.applied_keywords else "ALL"),
+        ("키워드", ", ".join(dashboard.applied_keywords) if dashboard.applied_keywords else "ALL"),
         ("적용 티커", dashboard.applied_ticker or "ALL"),
         ("티커 섹터", dashboard.ticker_sector or "ALL"),
-        ("분석 윈도우", f"{dashboard.window_start} ~ {dashboard.window_end}"),
+        ("분석 기간", f"{dashboard.window_start} ~ {dashboard.window_end}"),
     ]
     if DASHBOARD_SECTION_OVERVIEW in dashboard.computed_sections:
         metrics.extend(
@@ -596,7 +596,7 @@ def _summary_metrics(ctx: _PageContext) -> str:
     if DASHBOARD_SECTION_SECTOR_SPILLOVER in dashboard.computed_sections:
         metrics.append(("섹터 전이", f"{len(dashboard.sector_spillover.events.index):,d}"))
     if DASHBOARD_SECTION_DIVERGENCE in dashboard.computed_sections:
-        metrics.append(("괴리 알림", f"{len(dashboard.divergence.alerts.index):,d}"))
+        metrics.append(("관리 알림", f"{len(dashboard.divergence.alerts.index):,d}"))
     if DASHBOARD_SECTION_TOPICS in dashboard.computed_sections:
         metrics.append(("토픽 소스 기사", f"{len(dashboard.topics.source_articles.index):,d}"))
     return '<div class="metrics">' + "".join(
@@ -646,8 +646,8 @@ def _shared_form(form: dict[str, str], *, action: str, button_label: str) -> str
         <div><label>키워드</label><input type="text" name="event_keywords" value="{html.escape(form.get('event_keywords', ''))}" /></div>
         <div><label>티커</label><input type="text" name="ticker" value="{html.escape(form.get('ticker', ''))}" placeholder="005930" /></div>
         <div><label>조회 일수</label><input type="number" min="7" max="365" name="lookback_days" value="{html.escape(form.get('lookback_days', ''))}" /></div>
-        <div><label>이벤트 수평선</label><input type="number" min="1" max="20" name="horizon_days" value="{html.escape(form.get('horizon_days', ''))}" /></div>
-        <div><label>괴리 Top N</label><input type="number" min="5" max="100" name="divergence_top_n" value="{html.escape(form.get('divergence_top_n', ''))}" /></div>
+        <div><label>이벤트 평가일</label><input type="number" min="1" max="20" name="horizon_days" value="{html.escape(form.get('horizon_days', ''))}" /></div>
+        <div><label>관리 Top N</label><input type="number" min="5" max="100" name="divergence_top_n" value="{html.escape(form.get('divergence_top_n', ''))}" /></div>
         <div><label>토픽 수</label><input type="number" min="2" max="10" name="topic_count" value="{html.escape(form.get('topic_count', ''))}" /></div>
       </div>
       <div class="row">
@@ -681,15 +681,14 @@ def _layout_page(
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Stock News Lab</title>
+  <title>News Lab | KRX</title>
   <style>{_base_css()}</style>
 </head>
 <body>
   <div class="wrap">
-    <h1 style="margin:0 0 12px;">Stock News Lab | KRX</h1>
-    {_nav(active)}
-    {_page_head(title)}
+    <h1 style="margin:0 0 12px;">News Lab | KRX</h1>
     <div class="sub">{html.escape(subtitle)}</div>
+    {_nav(active)}
     {_shared_form(ctx.form, action=action, button_label=button_label)}
     {notices}
     {_summary_metrics(ctx)}
@@ -703,7 +702,7 @@ def _layout_page(
 def _overview_page(ctx: _PageContext) -> str:
     dashboard = ctx.dashboard
     if not _has_sections(dashboard, "overview"):
-        body = '<div class="card"><p class="hint">아직 결과가 없습니다. 상단에서 한 번 실행해 주세요.</p></div>'
+        body = '<div class="card"><p class="hint">아직 결과가 없습니다. 상단에서 실행해 주세요.</p></div>'
     else:
         overview = dashboard.overview
         body = f"""
@@ -724,7 +723,7 @@ def _overview_page(ctx: _PageContext) -> str:
     return _layout_page(
         active="overview",
         title="뉴스 개요",
-        subtitle="분석 계산 없이 최근 뉴스 데이터 자체를 빠르게 훑는 개요 페이지",
+        subtitle="최근 뉴스 데이터 자체를 빠르게 훑는 개요 페이지",
         ctx=ctx,
         action="/run_overview",
         button_label="뉴스 개요 갱신",
@@ -750,7 +749,7 @@ def _html_event_page(ctx: _PageContext) -> str:
           <div class="card"><h3>이벤트 스터디 요약</h3>{_safe_table(dashboard.event_study.summary, 10)}</div>
         </div>
         <div class="tables">
-          <div class="card"><h3>매치된 이벤트 뉴스</h3>{event_table}</div>
+          <div class="card"><h3>매칭된 이벤트 뉴스</h3>{event_table}</div>
         </div>
         """
     return _layout_page(
@@ -799,28 +798,28 @@ def _html_spillover_page(ctx: _PageContext) -> str:
 def _html_divergence_page(ctx: _PageContext) -> str:
     dashboard = ctx.dashboard
     if not _has_sections(dashboard, "divergence"):
-        body = '<div class="card"><p class="hint">뉴스-프라이스 다이버전스 결과가 없습니다.</p></div>'
+        body = '<div class="card"><p class="hint">뉴스-가격 다이버전스 결과가 없습니다.</p></div>'
     else:
         alerts = _safe_table(
             dashboard.divergence.alerts[
                 ["ticker", "publish_date", "effective_sentiment", "divergence_horizon_days", "divergence_return_pct", "divergence_score", "title"]
             ],
             100,
-        ) if not dashboard.divergence.alerts.empty else "<p class='hint'>괴리 알림이 없습니다.</p>"
+        ) if not dashboard.divergence.alerts.empty else "<p class='hint'>관리 알림이 없습니다.</p>"
         body = f"""
         {_divergence_interpretation(dashboard)}
         <div class="charts">
           <div class="card"><h3>감성 대비 반대 가격 반응</h3><img class="chart" src="data:image/png;base64,{_divergence_chart(dashboard)}" alt="divergence chart" /></div>
-          <div class="card"><h3>괴리 알림</h3>{alerts}</div>
+          <div class="card"><h3>관리 알림</h3>{alerts}</div>
         </div>
         """
     return _layout_page(
         active="divergence",
-        title="뉴스-프라이스 다이버전스",
-        subtitle="긍정 뉴스인데도 약하고, 부정 뉴스인데도 버티는 이상 반응을 잡는 페이지",
+        title="뉴스-가격 다이버전스",
+        subtitle="긍정 뉴스인데도 약하고 부정 뉴스인데도 버티는 이상 반응을 잡는 페이지",
         ctx=ctx,
         action="/run_divergence",
-        button_label="괴리 탐지 실행",
+        button_label="관리 알림 실행",
         content_html=body,
     )
 
@@ -846,7 +845,7 @@ def _html_expectation_page(ctx: _PageContext) -> str:
     return _layout_page(
         active="expectation",
         title="기대 리셋",
-        subtitle="강한 뉴스가 나왔는데도 가격 반응이 약한 종목을 선반영 후보로 보는 페이지",
+        subtitle="강한 뉴스에도 가격 반응이 약한 종목을 선반영 후보로 보는 페이지",
         ctx=ctx,
         action="/run_expectation_reset",
         button_label="기대 리셋 탐지 실행",
@@ -898,7 +897,7 @@ def _html_topics_page(ctx: _PageContext) -> str:
         {_topics_interpretation(dashboard)}
         <div class="charts">
           <div class="card"><h3>토픽 비중</h3><img class="chart" src="data:image/png;base64,{_topic_weight_chart(dashboard)}" alt="topic weight chart" /></div>
-          <div class="card"><h3>키워드 클라우드</h3>{_word_cloud_html(dashboard)}</div>
+          <div class="card"><h3>워드 클라우드</h3>{_word_cloud_html(dashboard)}</div>
         </div>
         <div class="table-grid">
           <div class="card"><h3>토픽 버킷</h3>{_safe_table(dashboard.topics.topics, 10)}</div>
@@ -992,7 +991,7 @@ def _html_refresh_page() -> str:
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Stock News Lab - 데이터 갱신</title>
+  <title>News Lab | KRX - 데이터 갱신</title>
   <style>
     {_base_css()}
     .small {{ font-size: 12px; color: var(--muted); }}
@@ -1009,10 +1008,9 @@ def _html_refresh_page() -> str:
 </head>
 <body>
   <div class="wrap">
-    <h1 style="margin:0 0 12px;">Stock News Lab | KRX</h1>
-    {_nav("refresh")}
-    {_page_head("데이터 갱신")}
+    <h1 style="margin:0 0 12px;">News Lab | KRX</h1>
     <div class="sub">뉴스 데이터만 증분 또는 일회성 백필로 갱신하고 진행 상황을 바로 확인하는 페이지</div>
+    {_nav("refresh")}
     <form class="card" method="post" action="/run_refresh">
       <div class="row">
         <button type="submit">뉴스 데이터 갱신 시작</button>
@@ -1104,7 +1102,7 @@ def _html_refresh_history_page() -> str:
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Stock News Lab - 데이터 갱신 이력</title>
+  <title>News Lab | KRX - 데이터 갱신 이력</title>
   <style>
     {_base_css()}
     .table-wrap {{ overflow: auto; max-height: 360px; border: 1px solid var(--line); border-radius: 10px; background: #fff; }}
@@ -1113,10 +1111,9 @@ def _html_refresh_history_page() -> str:
 </head>
 <body>
   <div class="wrap">
-    <h1 style="margin:0 0 12px;">Stock News Lab | KRX</h1>
-    {_nav("refresh")}
-    {_page_head("데이터 갱신 이력")}
+    <h1 style="margin:0 0 12px;">News Lab | KRX</h1>
     <div class="sub">뉴스 갱신 실행 요약과 최신 업데이트 결과를 누적해서 보는 페이지</div>
+    {_nav("refresh")}
     <div class="card">
       <h3>실행 요약</h3>
       <p id="history-generated" class="caption">생성 시각: -</p>
@@ -1625,7 +1622,7 @@ def launch_web_gui(host: str = "localhost", port: int = 8514, open_browser: bool
 
     server = ThreadingHTTPServer((host, int(port)), Handler)
     url = f"http://{host}:{port}"
-    print(f"Stock News Lab running at {url}", flush=True)
+    print(f"News Lab | KRX running at {url}", flush=True)
     if open_browser:
         try:
             webbrowser.open(url)
@@ -1638,3 +1635,5 @@ def launch_web_gui(host: str = "localhost", port: int = 8514, open_browser: bool
 
 
 run_web_gui = launch_web_gui
+
+
