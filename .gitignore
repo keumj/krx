@@ -17,6 +17,7 @@ data/users/
 data/.yfinance_tz_cache/
 data/.yfinance_cache/
 data/sp500_shared_db/
+data/sp500_components*.csv
 
 # Generated KRX refresh snapshots. Render reads the shared SQLite DB instead.
 data/*_all_metrics_prices.csv

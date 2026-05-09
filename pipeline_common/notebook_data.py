@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from .shared_sp500_prices_sql import (
+from .shared_krx_prices_sql import (
     TREASURY_DATASET,
     load_financial_market_frame,
     load_financial_market_series,
@@ -35,25 +35,6 @@ try:
     from curl_cffi import requests as curl_requests
 except Exception:  # pragma: no cover - optional dependency
     curl_requests = None
-
-
-DEFAULT_SP500_COMPONENTS = pd.DataFrame(
-    {
-        "Symbol": ["AAPL", "MSFT", "NVDA", "AMZN", "JPM", "XOM", "UNH", "PG", "HD", "META"],
-        "Sector": [
-            "Information Technology",
-            "Information Technology",
-            "Information Technology",
-            "Consumer Discretionary",
-            "Financials",
-            "Energy",
-            "Health Care",
-            "Consumer Staples",
-            "Consumer Discretionary",
-            "Communication Services",
-        ],
-    }
-)
 
 
 def _prefer_live_data() -> bool:
@@ -586,52 +567,6 @@ def load_index_series(symbol: str, start: str = "2012-01-02", seed: int = 0) -> 
     base = 4500.0 if symbol == "US500" else 22000.0
     return make_gbm_series(symbol, start=start, base=base, drift=0.0002, vol=0.01, seed=seed, min_periods=1500), "fallback"
 
-def _load_components_local(max_symbols: int) -> tuple[pd.DataFrame | None, str | None]:
-    candidates = _unique_nonempty([
-        os.getenv("SP500_COMPONENTS_CSV_PATH", ""),
-        "data/sp500_components_full.csv",
-        "data/sp500_components.csv",
-    ])
-    for csv_path in candidates:
-        path = Path(csv_path)
-        if not path.exists() or not path.is_file():
-            continue
-        try:
-            df = pd.read_csv(path)
-        except Exception:
-            continue
-        cols = {str(c).lower(): c for c in df.columns}
-        sym = cols.get("symbol")
-        sec = cols.get("sector")
-        if sym is None or sec is None:
-            continue
-        out = df[[sym, sec]].copy()
-        out.columns = ["Symbol", "Sector"]
-        out = out.dropna().drop_duplicates("Symbol")
-        if not out.empty:
-            return out.head(max_symbols).reset_index(drop=True), f"local_csv:{csv_path}"
-    return None, None
-
-
-def load_sp500_components(max_symbols: int = 80) -> tuple[pd.DataFrame, str]:
-    live_first = _prefer_live_data()
-    local_df, local_src = _load_components_local(max_symbols)
-    if not live_first and local_df is not None:
-        return local_df, local_src or "local_csv"
-
-    if fdr is not None:
-        try:
-            comps = fdr.StockListing("S&P500")[["Symbol", "Sector"]].dropna().drop_duplicates("Symbol")
-            return comps.head(max_symbols).reset_index(drop=True), "fdr"
-        except Exception as exc:
-            warnings.warn(f"StockListing failed, fallback used: {exc}")
-
-    if local_df is not None:
-        return local_df, local_src or "local_csv"
-
-    return DEFAULT_SP500_COMPONENTS.copy().head(max_symbols).reset_index(drop=True), "fallback"
-
-
 def _normalize_symbols(symbols: list[str]) -> list[str]:
     out: list[str] = []
     seen: set[str] = set()
@@ -675,93 +610,6 @@ def _load_prices_shared_db(symbols: list[str], start_date: str) -> tuple[pd.Data
     return None, None
 
 
-
-
-def _load_prices_wide_local(symbols: list[str], start_date: str) -> tuple[pd.DataFrame | None, str | None]:
-    candidates = _unique_nonempty([
-        os.getenv("SP500_METRICS_CSV_PATH", ""),
-        "data/sp500_all_metrics_prices.csv",
-    ])
-    for csv_path in candidates:
-        path = Path(csv_path)
-        if not path.exists() or not path.is_file():
-            continue
-        try:
-            raw = pd.read_csv(path)
-        except Exception:
-            continue
-        if raw.empty:
-            continue
-        cols = {str(c).lower(): c for c in raw.columns}
-        date_col = cols.get("date") or cols.get("datetime")
-        if date_col is None:
-            date_col = raw.columns[0]
-
-        out = raw.copy()
-        out[date_col] = pd.to_datetime(out[date_col], errors="coerce")
-        out = out.dropna(subset=[date_col]).set_index(date_col).sort_index()
-        rename_map = {f"{symbol}_Close": symbol for symbol in symbols if f"{symbol}_Close" in out.columns}
-        keep = [s for s in symbols if s in out.columns]
-        if rename_map:
-            out = out[list(rename_map)].rename(columns=rename_map)
-            keep = [s for s in symbols if s in out.columns]
-        if not keep:
-            continue
-        out = out[keep].apply(pd.to_numeric, errors="coerce")
-        out = out[out.index >= pd.Timestamp(start_date)].dropna(how="all")
-        if not out.empty:
-            return out, f"local_csv:{csv_path}"
-    return None, None
-
-
-def _load_prices_panel_local(symbols: list[str], start_date: str) -> tuple[pd.DataFrame | None, str | None]:
-    base_dir = Path(os.getenv("SP500_PRICES_PANEL_DIR", "data/sp500_prices"))
-    if not base_dir.exists() or not base_dir.is_dir():
-        return None, None
-
-    series: list[pd.Series] = []
-    for s in symbols:
-        csv_path = str(base_dir / f"{s}.csv")
-        ss = _read_local_series(csv_path, value_col_candidates=["close", "adj close", "price", "value"], name=s, start=start_date)
-        if ss is not None:
-            series.append(ss.rename(s))
-    if not series:
-        return None, None
-
-    out = pd.concat(series, axis=1).sort_index().dropna(how="all")
-    if out.empty:
-        return None, None
-    return out, "local_csv:data/sp500_prices/*.csv"
-
-
-
-
-def fetch_sp500_close_prices(symbols: list[str], start_date: str) -> tuple[pd.DataFrame, str]:
-    normalized_symbols = _normalize_symbols(symbols)
-    if not normalized_symbols:
-        return pd.DataFrame(), "empty"
-
-    shared_cached_df, shared_cached_src = _load_prices_shared_db(normalized_symbols, start_date)
-    if shared_cached_df is not None:
-        return shared_cached_df, shared_cached_src or "shared_db"
-
-    if _krx_local_csv_fallback_enabled():
-        local_wide_df, local_wide_src = _load_prices_wide_local(normalized_symbols, start_date)
-        if local_wide_df is not None:
-            return local_wide_df, local_wide_src or "local_csv"
-
-        local_panel_df, local_panel_src = _load_prices_panel_local(normalized_symbols, start_date)
-        if local_panel_df is not None:
-            return local_panel_df, local_panel_src or "local_csv"
-
-    if not _krx_synthetic_fallback_enabled():
-        return pd.DataFrame(columns=normalized_symbols), "unavailable:shared_sqlite_missing_or_empty"
-
-    rng = np.random.default_rng(123)
-    idx = pd.bdate_range(start=start_date, end=pd.Timestamp.today().normalize())
-    shocks = rng.normal(0.0003, 0.012, size=(len(idx), len(normalized_symbols)))
-    levels = 100.0 * np.exp(np.cumsum(shocks, axis=0))
-    return pd.DataFrame(levels, index=idx, columns=normalized_symbols), "fallback"
 
 
 def load_krx_components(max_symbols: int | None = None, *, components_csv: str | os.PathLike[str] | None = None) -> tuple[pd.DataFrame, str]:
@@ -815,8 +663,6 @@ __all__ = [
     "load_btc_close",
     "load_fx_close",
     "load_index_series",
-    "load_sp500_components",
-    "fetch_sp500_close_prices",
     "load_krx_components",
     "fetch_krx_close_prices",
 ]

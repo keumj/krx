@@ -13,6 +13,7 @@ from pipeline_krx.db import init_krx_project_db, krx_prices_sqlite_path
 
 DEFAULT_SHARED_DB_ROOT = Path(os.getenv("KEUMJ_KRX_DB_DIR", "data/krx_shared_db"))
 DEFAULT_SQLITE_NAME = str(os.getenv("KEUMJ_KRX_DB_SQLITE_NAME", "krx_shared_prices.sqlite")).strip() or "krx_shared_prices.sqlite"
+TREASURY_DATASET = "treasury_yields"
 NEWS_ANALYSIS_STATUS_PENDING = "pending"
 NEWS_ANALYSIS_STATUS_PROCESSING = "processing"
 NEWS_ANALYSIS_STATUS_DONE = "done"
@@ -217,6 +218,94 @@ def load_shared_adjusted_close_prices_for_symbols(
     db_path: Path | str | None = None,
 ) -> tuple[pd.DataFrame | None, str | None]:
     return _metric_pivot(symbols, value_col="adj_close", start_date=start_date, end_date=end_date, shared_db_root=shared_db_root, db_path=db_path)
+
+
+def load_financial_market_series(
+    dataset: str,
+    *,
+    series_id: str,
+    start_date: str | pd.Timestamp,
+    end_date: str | pd.Timestamp | None = None,
+    shared_db_root: Path | str | None = None,
+    db_path: Path | str | None = None,
+) -> tuple[pd.Series | None, str | None]:
+    target = _target_path(shared_db_root, db_path)
+    if not target.exists() or not target.is_file():
+        return None, None
+
+    start_text = pd.Timestamp(start_date).normalize().strftime("%Y-%m-%d")
+    end_text = pd.Timestamp(end_date).normalize().strftime("%Y-%m-%d") if end_date is not None else None
+    query = f"SELECT date, value FROM {dataset} WHERE series_id = ? AND date >= ?"
+    params: list[object] = [series_id, start_text]
+    if end_text is not None:
+        query += " AND date <= ?"
+        params.append(end_text)
+    query += " ORDER BY date"
+
+    try:
+        raw = _query(target, query, params)
+    except Exception:
+        return None, None
+    if raw.empty:
+        return None, None
+
+    raw["date"] = pd.to_datetime(raw["date"], errors="coerce")
+    raw["value"] = pd.to_numeric(raw["value"], errors="coerce")
+    raw = raw.dropna(subset=["date", "value"]).sort_values("date")
+    if raw.empty:
+        return None, None
+
+    series = pd.Series(raw["value"].values, index=raw["date"].dt.normalize(), name=series_id)
+    series = series[~series.index.duplicated(keep="last")]
+    return (series, f"sqlite:{target.as_posix()}") if not series.empty else (None, None)
+
+
+def load_financial_market_frame(
+    dataset: str,
+    *,
+    series_ids: list[str],
+    start_date: str | pd.Timestamp,
+    end_date: str | pd.Timestamp | None = None,
+    shared_db_root: Path | str | None = None,
+    db_path: Path | str | None = None,
+) -> tuple[pd.DataFrame | None, str | None]:
+    if not series_ids:
+        return None, None
+
+    target = _target_path(shared_db_root, db_path)
+    if not target.exists() or not target.is_file():
+        return None, None
+
+    start_text = pd.Timestamp(start_date).normalize().strftime("%Y-%m-%d")
+    end_text = pd.Timestamp(end_date).normalize().strftime("%Y-%m-%d") if end_date is not None else None
+    placeholders = ",".join("?" for _ in series_ids)
+    query = f"SELECT date, series_id, value FROM {dataset} WHERE series_id IN ({placeholders}) AND date >= ?"
+    params: list[object] = [*series_ids, start_text]
+    if end_text is not None:
+        query += " AND date <= ?"
+        params.append(end_text)
+    query += " ORDER BY date, series_id"
+
+    try:
+        raw = _query(target, query, params)
+    except Exception:
+        return None, None
+    if raw.empty:
+        return None, None
+
+    raw["date"] = pd.to_datetime(raw["date"], errors="coerce")
+    raw["value"] = pd.to_numeric(raw["value"], errors="coerce")
+    raw = raw.dropna(subset=["date", "series_id", "value"]).sort_values(["date", "series_id"])
+    if raw.empty:
+        return None, None
+
+    frame = raw.pivot_table(index="date", columns="series_id", values="value", aggfunc="last").sort_index()
+    cols = [series_id for series_id in series_ids if series_id in frame.columns]
+    if not cols:
+        return None, None
+    frame = frame[cols].dropna(how="all")
+    frame.index = pd.to_datetime(frame.index).normalize()
+    return (frame, f"sqlite:{target.as_posix()}") if not frame.empty else (None, None)
 
 
 def load_shared_quarterly_fundamentals_for_symbols(

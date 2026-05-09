@@ -114,9 +114,9 @@ def ns_curve(tau: np.ndarray, beta0: float, beta1: float, beta2: float, lamb: fl
     return beta0 + beta1 * f1 + beta2 * f2
 
 
-def build_sector_symbol_map(sp500_components: pd.DataFrame, monthly_returns_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
+def build_sector_symbol_map(components: pd.DataFrame, monthly_returns_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
     available_symbols = set(monthly_returns_df.columns)
-    sector_data = sp500_components[sp500_components["Symbol"].isin(available_symbols)][["Symbol", "Sector"]].copy()
+    sector_data = components[components["Symbol"].isin(available_symbols)][["Symbol", "Sector"]].copy()
     if sector_data.empty:
         raise RuntimeError("No overlap between component list and return series columns.")
     sector_to_symbols = sector_data.groupby("Sector")["Symbol"].apply(list)
