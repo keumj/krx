@@ -389,7 +389,7 @@ class _CachedData:
 
 def _default_form() -> dict[str, str]:
     return {
-        "ticker": "AAPL",
+        "ticker": "005930",
         "action": "all",
         "output_dir": "outputs/technical_analysis",
         "auto_save": "on",
@@ -632,8 +632,8 @@ def _fetch_common_loader_ohlcv(ticker: str) -> tuple[pd.DataFrame, str]:
             start=start,
             fallback_base=base_map.get(ticker_clean, 1.0),
         )
-    elif ticker_clean in {"US500", "HSI"}:
-        seed_map = {"US500": 19, "HSI": 23}
+    elif ticker_clean in {"KS11", "KQ11", "HSI"}:
+        seed_map = {"KS11": 19, "KQ11": 21, "HSI": 23}
         close, source = load_index_series(ticker_clean, start=start, seed=seed_map.get(ticker_clean, 0))
     else:
         try:
@@ -1269,7 +1269,7 @@ def _render_page(form: dict[str, str], ctx: _RunContext | None, error: str | Non
       <div class='grid'>
         <div>
           <label>Ticker</label>
-          <input type='text' name='ticker' value='{html.escape(f.get("ticker", "AAPL"))}' placeholder='AAPL, TSLA, MSFT, ...' />
+          <input type='text' name='ticker' value='{html.escape(f.get("ticker", "005930"))}' placeholder='005930, 000660, 035420, ...' />
         </div>
         <div>
           <label>Output Base Directory</label>

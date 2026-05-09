@@ -617,10 +617,24 @@ def _fetch_close_prices_with_source(
 
     errors: list[str] = []
 
-    if yf is not None:
+    try:
+        close, source = _load_close_from_local_sources(ticker_clean, start_ts=start_ts, end_ts=end_ts)
+        if close is not None and not close.empty:
+            return close, source or "common_loader"
+        errors.append("common loader unavailable")
+    except Exception as exc:
+        errors.append(f"common loader unavailable: {exc}")
+
+    try:
+        return _fetch_close_prices_technical_cache(ticker_clean, start_ts=start_ts, end_ts=end_ts)
+    except Exception as tech_exc:
+        errors.append(f"technical cache fallback failed: {tech_exc}")
+
+    if yf is not None and os.getenv("KEUMJ_KRX_ALLOW_YFINANCE_FALLBACK", "").strip().lower() in {"1", "true", "yes", "on"}:
+        yahoo_ticker = f"{ticker_clean}.KS" if ticker_clean.isdigit() else ticker_clean
         try:
             raw = yf.download(
-                ticker_clean,
+                yahoo_ticker,
                 start=start_ts.normalize().strftime("%Y-%m-%d"),
                 end=(end_ts.normalize() + pd.Timedelta(days=1)).strftime("%Y-%m-%d"),
                 progress=False,
@@ -637,28 +651,13 @@ def _fetch_close_prices_with_source(
                     close = close[(close.index >= start_ts.normalize()) & (close.index <= end_ts.normalize())]
                     if not close.empty:
                         close.name = "close"
-                        return close, "yfinance"
-            errors.append("yfinance download failed")
+                        return close, "yfinance_krx_fallback"
+            errors.append("optional yfinance KRX fallback returned no data")
         except Exception as exc:
-            errors.append(f"yfinance download failed: {exc}")
-    else:
-        errors.append("yfinance unavailable")
+            errors.append(f"optional yfinance KRX fallback failed: {exc}")
 
-    try:
-        close, source = _load_close_from_local_sources(ticker_clean, start_ts=start_ts, end_ts=end_ts)
-        if close is not None and not close.empty:
-            return close, source or "common_loader"
-        errors.append("common loader unavailable")
-    except Exception as exc:
-        errors.append(f"common loader unavailable: {exc}")
-
-    try:
-        return _fetch_close_prices_technical_cache(ticker_clean, start_ts=start_ts, end_ts=end_ts)
-    except Exception as tech_exc:
-        detail = " | ".join(errors) if errors else "no provider available"
-        raise ValueError(
-            f"{detail}; technical cache fallback failed for '{ticker_clean}': {tech_exc}"
-        ) from tech_exc
+    detail = " | ".join(errors) if errors else "no KRX provider available"
+    raise ValueError(f"{detail}; no KRX shared price data found for '{ticker_clean}'")
 
 
 def fetch_close_prices(

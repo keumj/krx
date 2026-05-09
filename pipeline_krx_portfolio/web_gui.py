@@ -518,7 +518,7 @@ def _data_entry_page(ctx: _PageContext) -> str:
         <input type="hidden" name="end_date" value="{html.escape(ctx.end_date)}">
         <div class="form-grid">
           <div><label>거래일</label><input type="date" name="trade_date" required></div>
-          <div><label>티커</label><input type="text" name="ticker" placeholder="AAPL" required></div>
+          <div><label>티커</label><input type="text" name="ticker" placeholder="005930" required></div>
           <div><label>매수/매도</label><select name="side"><option value="BUY">BUY</option><option value="SELL">SELL</option></select></div>
           <div><label>수량</label><input type="number" min="0.0001" step="0.0001" name="quantity" required></div>
           <div><label>가격</label><input type="number" min="0.0001" step="0.0001" name="price" required></div>
@@ -762,7 +762,7 @@ def _virtual_trade_page(ctx: _PageContext) -> str:
         <input type="hidden" name="start_date" value="{html.escape(ctx.start_date)}">
         <input type="hidden" name="end_date" value="{html.escape(ctx.end_date)}">
         <div class="form-grid form-virtual">
-          <div><label>티커</label><input type="text" name="ticker" placeholder="AAPL" required></div>
+          <div><label>티커</label><input type="text" name="ticker" placeholder="005930" required></div>
           <div><label>매수/매도</label><select name="side"><option value="BUY">BUY</option><option value="SELL">SELL</option></select></div>
           <div><label>수량</label><input type="number" min="0.0001" step="0.0001" name="quantity" required></div>
           <div><label>가격(비우면 최신가)</label><input type="number" min="0.0001" step="0.0001" name="price"></div>

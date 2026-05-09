@@ -644,7 +644,7 @@ def _shared_form(form: dict[str, str], *, action: str, button_label: str) -> str
     <form class="card" method="post" action="{action}">
       <div class="form-grid">
         <div><label>키워드</label><input type="text" name="event_keywords" value="{html.escape(form.get('event_keywords', ''))}" /></div>
-        <div><label>티커</label><input type="text" name="ticker" value="{html.escape(form.get('ticker', ''))}" placeholder="AAPL" /></div>
+        <div><label>티커</label><input type="text" name="ticker" value="{html.escape(form.get('ticker', ''))}" placeholder="005930" /></div>
         <div><label>조회 일수</label><input type="number" min="7" max="365" name="lookback_days" value="{html.escape(form.get('lookback_days', ''))}" /></div>
         <div><label>이벤트 수평선</label><input type="number" min="1" max="20" name="horizon_days" value="{html.escape(form.get('horizon_days', ''))}" /></div>
         <div><label>괴리 Top N</label><input type="number" min="5" max="100" name="divergence_top_n" value="{html.escape(form.get('divergence_top_n', ''))}" /></div>

@@ -35,7 +35,7 @@ STOCK_REWRITES = {
 class StockState:
     forecast_form: dict[str, str] = field(
         default_factory=lambda: {
-            "ticker": "AAPL",
+            "ticker": "005930",
             "forecast_horizon": "10",
             "history_years": "8",
             "start_date": "2025-12-31",
@@ -52,20 +52,19 @@ class StockState:
     forecast_error: str | None = None
     financials_form: dict[str, str] = field(
         default_factory=lambda: {
-            "ticker": "AAPL",
+            "ticker": "005930",
             "statement_periods": "4",
             "output_dir": "outputs/stock_forecast_finance",
             "auto_save": "on",
             "insecure_ssl": "",
             "ca_bundle_path": "",
-            "fmp_api_key": "",
         }
     )
     financials_ctx: object | None = None
     financials_error: str | None = None
     technical_form: dict[str, str] = field(
         default_factory=lambda: {
-            "ticker": "AAPL",
+            "ticker": "005930",
             "output_dir": "outputs/technical_analysis",
             "use_sample": "",
             "auto_save": "on",
@@ -75,21 +74,21 @@ class StockState:
     technical_ctx: object | None = None
     technical_error: str | None = None
     technical_cache: object | None = None
-    returns_form: dict[str, str] = field(default_factory=lambda: {"ticker": "AAPL"})
+    returns_form: dict[str, str] = field(default_factory=lambda: {"ticker": "005930"})
     returns_ctx: object | None = None
     returns_error: str | None = None
-    risk_form: dict[str, str] = field(default_factory=lambda: {"ticker": "AAPL"})
+    risk_form: dict[str, str] = field(default_factory=lambda: {"ticker": "005930"})
     risk_ctx: object | None = None
     risk_error: str | None = None
-    factor_form: dict[str, str] = field(default_factory=lambda: {"ticker": "AAPL"})
+    factor_form: dict[str, str] = field(default_factory=lambda: {"ticker": "005930"})
     factor_ctx: object | None = None
     factor_error: str | None = None
-    decision_form: dict[str, str] = field(default_factory=lambda: {"ticker": "AAPL"})
+    decision_form: dict[str, str] = field(default_factory=lambda: {"ticker": "005930"})
     decision_ctx: object | None = None
     decision_error: str | None = None
     wfv_form: dict[str, str] = field(
         default_factory=lambda: {
-            "ticker": "AAPL",
+            "ticker": "005930",
             "forecast_horizon": "10",
             "history_years": "8",
             "start_date": "2025-12-31",

@@ -564,7 +564,7 @@ def load_index_series(symbol: str, start: str = "2012-01-02", seed: int = 0) -> 
         if s is not None:
             return s, f"local_csv:{csv_path}"
 
-    base = 4500.0 if symbol == "US500" else 22000.0
+    base = 2600.0 if symbol == "KS11" else 800.0 if symbol == "KQ11" else 22000.0
     return make_gbm_series(symbol, start=start, base=base, drift=0.0002, vol=0.01, seed=seed, min_periods=1500), "fallback"
 
 def _normalize_symbols(symbols: list[str]) -> list[str]:

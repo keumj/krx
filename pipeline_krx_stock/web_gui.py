@@ -27,14 +27,18 @@ from sklearn.base import clone
 
 from pipeline_common.notebook_data import fetch_krx_close_prices
 from pipeline_common.security import configure_ssl, ensure_writable_dir, security_hint
-from pipeline_common.shared_krx_prices_sql import load_shared_market_caps_for_symbols
+from pipeline_common.shared_krx_prices_sql import (
+    load_shared_close_prices_for_symbols,
+    load_shared_market_caps_for_symbols,
+    load_shared_quarterly_fundamentals_for_symbols,
+    shared_prices_sqlite_path,
+)
 from . import technical_analysis as ta_web_gui
 
 from .forecast import (
     StockForecastResult,
     _build_direction_model_specs,
     _build_model_specs,
-    _build_yfinance_session,
     _build_supervised_dataset,
     classify_regime_from_feature_row,
     _fetch_close_prices_with_source,
@@ -43,11 +47,6 @@ from .forecast import (
     load_price_data_csv,
     run_ticker_stock_forecast_pipeline,
 )
-
-try:
-    import yfinance as yf
-except ImportError:  # pragma: no cover - optional runtime dependency
-    yf = None
 
 matplotlib.use("Agg")
 import matplotlib.dates as mdates  # noqa: E402
@@ -2233,20 +2232,20 @@ def _build_financial_source_table(
 
 def _build_financial_provider_status_table(
     *,
-    yfinance_info: str,
-    yfinance_statements: str,
+    krx_security_master: str,
+    krx_quarterly_fundamentals: str,
     price_history: str,
-    sec_fallback: str,
-    fmp_metrics: str,
+    market_cap_history: str,
+    external_provider: str,
     derived_metrics: str,
 ) -> pd.DataFrame:
     return _metadata_table(
         [
-            ("yfinance_info", yfinance_info),
-            ("yfinance_statements", yfinance_statements),
+            ("krx_security_master", krx_security_master),
+            ("krx_quarterly_fundamentals", krx_quarterly_fundamentals),
             ("price_history", price_history),
-            ("sec_fallback", sec_fallback),
-            ("fmp_metrics", fmp_metrics),
+            ("market_cap_history", market_cap_history),
+            ("external_provider", external_provider),
             ("derived_metrics", derived_metrics),
         ]
     )
@@ -3116,27 +3115,30 @@ def _request_verify_value(ca_bundle_path: str | None, insecure_ssl: bool) -> boo
     return True
 
 
-_SEC_COMPANY_NAME_CACHE: list[tuple[str, str]] | None = None
 _TICKER_TOKEN_RE = re.compile(r"^[A-Za-z0-9\.^/\-_=]{1,15}$")
 _LOCAL_COMPANY_ALIAS = {
-    "apple": "AAPL",
-    "microsoft": "MSFT",
-    "nvidia": "NVDA",
-    "amazon": "AMZN",
-    "tesla": "TSLA",
-    "alphabet": "GOOGL",
-    "google": "GOOGL",
-    "meta": "META",
-    "netflix": "NFLX",
-    "애플": "AAPL",
-    "마이크로소프트": "MSFT",
-    "엔비디아": "NVDA",
-    "아마존": "AMZN",
-    "테슬라": "TSLA",
-    "구글": "GOOGL",
-    "알파벳": "GOOGL",
-    "메타": "META",
-    "넷플릭스": "NFLX",
+    "samsung": "005930",
+    "samsung electronics": "005930",
+    "sk hynix": "000660",
+    "hynix": "000660",
+    "naver": "035420",
+    "hyundai motor": "005380",
+    "hyundai": "005380",
+    "kia": "000270",
+    "lg energy solution": "373220",
+    "samsung biolo": "207940",
+    "셀트리온": "068270",
+    "삼성전자": "005930",
+    "삼성": "005930",
+    "에스케이하이닉스": "000660",
+    "SK하이닉스": "000660",
+    "하이닉스": "000660",
+    "네이버": "035420",
+    "현대차": "005380",
+    "기아": "000270",
+    "엘지에너지솔루션": "373220",
+    "LG에너지솔루션": "373220",
+    "삼성바이오로직스": "207940",
 }
 
 
@@ -3148,122 +3150,47 @@ def _is_likely_ticker_symbol(text: str) -> bool:
     return bool(_TICKER_TOKEN_RE.fullmatch(str(text).strip()))
 
 
-def _sec_company_name_index(verify: bool | str) -> list[tuple[str, str]]:
-    global _SEC_COMPANY_NAME_CACHE
-    if _SEC_COMPANY_NAME_CACHE is not None:
-        return _SEC_COMPANY_NAME_CACHE
 
-    payload = _sec_get_json(SEC_TICKERS_URL, verify=verify)
-    if payload is None:
-        return []
-
-    entries = payload.values() if isinstance(payload, dict) else []
-    parsed: list[tuple[str, str]] = []
-    for item in entries:
-        if not isinstance(item, dict):
-            continue
-        ticker = str(item.get("ticker", "")).strip().upper()
-        title = str(item.get("title", "")).strip()
-        if not ticker or not title:
-            continue
-        parsed.append((ticker, title))
-
-    if parsed:
-        _SEC_COMPANY_NAME_CACHE = parsed
-    return parsed
-
-
-def _score_company_match(query_norm: str, title_norm: str) -> int:
-    if not query_norm or not title_norm:
-        return -1
-
-    score = 0
-    if query_norm == title_norm:
-        score += 120
-    elif title_norm.startswith(query_norm):
-        score += 90
-    elif query_norm in title_norm:
-        score += 70
-
-    terms = [t for t in query_norm.split() if len(t) >= 2]
-    if not terms:
-        terms = [query_norm]
-
-    matched = sum(1 for term in terms if term in title_norm)
-    if matched == 0 and query_norm not in title_norm:
-        return -1
-
-    score += matched * 8
-    score -= max(0, len(title_norm) - len(query_norm)) // 20
-    return score
-
-
-def _search_ticker_from_sec(query: str, *, verify: bool | str) -> tuple[str, str, str] | None:
-    q_raw = str(query).strip()
-    q_norm = _normalize_search_text(q_raw)
-    if len(q_norm) < 2:
+def _search_ticker_from_krx_db(query: str) -> tuple[str, str, str] | None:
+    q_raw = str(query or "").strip()
+    if len(q_raw) < 2:
         return None
-
-    best: tuple[int, str, str] | None = None
-    for ticker, title in _sec_company_name_index(verify=verify):
-        title_norm = _normalize_search_text(title)
-        score = _score_company_match(q_norm, title_norm)
-        if score < 0:
-            continue
-        if ticker == q_raw.upper():
-            score += 80
-        if best is None or score > best[0]:
-            best = (score, ticker, title)
-
-    if best is None:
+    q_norm = q_raw.lower()
+    target = shared_prices_sqlite_path()
+    if not target.exists():
         return None
-    return best[1], best[2], "sec_company_tickers"
-
-
-def _search_ticker_from_yfinance(
-    query: str,
-    *,
-    ca_bundle_path: str | None,
-    insecure_ssl: bool,
-) -> tuple[str, str, str] | None:
-    if yf is None or not hasattr(yf, "Search"):
-        return None
-
-    kwargs: dict[str, object] = {"max_results": 8, "news_count": 0}
-    session = _build_yfinance_session(ca_bundle=ca_bundle_path, insecure_ssl=insecure_ssl)
-    if session is not None:
-        kwargs["session"] = session
 
     try:
-        search = yf.Search(query, **kwargs)
-    except TypeError:
-        kwargs.pop("session", None)
-        try:
-            search = yf.Search(query, **kwargs)
-        except Exception:
-            return None
+        with sqlite3.connect(target) as conn:
+            rows = conn.execute(
+                """
+                SELECT symbol, COALESCE(name_kr, ''), COALESCE(name_en, '')
+                FROM securities
+                WHERE is_active = 1
+                  AND (
+                    symbol = ?
+                    OR LOWER(COALESCE(name_kr, '')) LIKE ?
+                    OR LOWER(COALESCE(name_en, '')) LIKE ?
+                  )
+                ORDER BY
+                  CASE
+                    WHEN symbol = ? THEN 0
+                    WHEN LOWER(COALESCE(name_kr, '')) = ? THEN 1
+                    WHEN LOWER(COALESCE(name_en, '')) = ? THEN 2
+                    ELSE 3
+                  END,
+                  symbol
+                LIMIT 1
+                """,
+                (q_raw.zfill(6) if q_raw.isdigit() else q_raw.upper(), f"%{q_norm}%", f"%{q_norm}%", q_raw.zfill(6) if q_raw.isdigit() else q_raw.upper(), q_norm, q_norm),
+            ).fetchall()
     except Exception:
         return None
-
-    quotes = getattr(search, "quotes", None)
-    if not isinstance(quotes, list):
+    if not rows:
         return None
-
-    for item in quotes:
-        if not isinstance(item, dict):
-            continue
-        symbol = str(item.get("symbol", "")).strip().upper()
-        if not symbol or not _is_likely_ticker_symbol(symbol):
-            continue
-
-        quote_type = str(item.get("quoteType", "")).strip().upper()
-        if quote_type and quote_type not in {"EQUITY", "ETF", "INDEX"}:
-            continue
-
-        title = str(item.get("shortname") or item.get("longname") or item.get("displayName") or symbol).strip()
-        return symbol, title, "yfinance_search"
-
-    return None
+    symbol, name_kr, name_en = rows[0]
+    title = str(name_kr or name_en or symbol)
+    return str(symbol).strip().upper(), title, "krx_securities"
 
 
 def _resolve_ticker_input(
@@ -3277,6 +3204,8 @@ def _resolve_ticker_input(
         return None, None, False
 
     upper_raw = raw.upper()
+    if raw.isdigit():
+        return raw.zfill(6), None, False
 
     alias_ticker = _LOCAL_COMPANY_ALIAS.get(raw.lower())
     if alias_ticker:
@@ -3287,26 +3216,22 @@ def _resolve_ticker_input(
     if _is_likely_ticker_symbol(raw) and raw == upper_raw and " " not in raw:
         return upper_raw, None, False
 
-    verify = _request_verify_value(ca_bundle_path=ca_bundle_path, insecure_ssl=insecure_ssl)
-
-    sec_match = _search_ticker_from_sec(raw, verify=verify)
-    if sec_match is not None:
-        ticker, title, source = sec_match
+    krx_match = _search_ticker_from_krx_db(raw)
+    if krx_match is not None:
+        ticker, title, source = krx_match
         if ticker != upper_raw:
             return ticker, f"Resolved ticker: '{raw}' -> '{ticker}' ({title}, {source})", False
         return ticker, None, False
 
-    yf_match = _search_ticker_from_yfinance(raw, ca_bundle_path=ca_bundle_path, insecure_ssl=insecure_ssl)
-    if yf_match is not None:
-        ticker, title, source = yf_match
-        if ticker != upper_raw:
-            return ticker, f"Resolved ticker: '{raw}' -> '{ticker}' ({title}, {source})", False
-        return ticker, None, False
+    if raw.endswith(".KS") or raw.endswith(".KQ"):
+        base = raw[:-3]
+        if base.isdigit():
+            return base.zfill(6), f"Resolved ticker: '{raw}' -> '{base.zfill(6)}' (KRX Yahoo suffix removed)", False
 
     if _is_likely_ticker_symbol(upper_raw) and " " not in raw:
         return upper_raw, None, False
 
-    return None, f"Could not resolve company name '{raw}' to a ticker symbol.", True
+    return None, f"Could not resolve KRX company name '{raw}' to a ticker symbol.", True
 
 
 def _to_number(value: object) -> float | int | None:
@@ -3427,629 +3352,182 @@ def _statement_preview_from_df(df: pd.DataFrame, row_map: dict[str, list[str]], 
     return pd.DataFrame(rows)
 
 
-SEC_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
-SEC_COMPANYFACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
-FMP_BASE_URL = "https://financialmodelingprep.com/stable"
 
-
-def _resolve_fmp_api_key(api_key: str | None) -> str | None:
-    key = str(api_key).strip() if api_key else ""
-    if not key:
-        key = str(os.getenv("FMP_API_KEY", "")).strip()
-    return key or None
-
-
-def _fmp_get_json(endpoint: str, *, symbol: str, api_key: str | None, verify: bool | str) -> dict[str, object] | None:
-    if not api_key:
-        return None
-
-    session = requests.Session()
+def _krx_company_name(ticker: str) -> str:
+    target = shared_prices_sqlite_path()
+    if not target.exists():
+        return ticker
     try:
-        resp = session.get(
-            f"{FMP_BASE_URL}/{endpoint}",
-            params={"symbol": symbol, "apikey": api_key},
-            timeout=20,
-            verify=verify,
-        )
-        resp.raise_for_status()
-        payload = resp.json()
+        with sqlite3.connect(target) as conn:
+            row = conn.execute(
+                "SELECT COALESCE(name_kr, ''), COALESCE(name_en, '') FROM securities WHERE symbol = ?",
+                (ticker,),
+            ).fetchone()
     except Exception:
-        return None
-
-    if isinstance(payload, list):
-        if payload and isinstance(payload[0], dict):
-            return payload[0]
-        return None
-    return payload if isinstance(payload, dict) else None
+        return ticker
+    if not row:
+        return ticker
+    return str(row[0] or row[1] or ticker)
 
 
-def _first_number(source: dict[str, object] | None, *keys: str) -> float | int | None:
-    if not isinstance(source, dict):
-        return None
-    for key in keys:
-        value = _to_number(source.get(key))
-        if value is not None:
-            return value
-    return None
-
-def _lookup_number(source: object, *keys: str) -> float | int | None:
-    if source is None:
-        return None
-    for key in keys:
-        value = None
-        if isinstance(source, dict):
-            value = source.get(key)
-        else:
-            try:
-                value = getattr(source, key)
-            except Exception:
-                value = None
-        numeric = _to_number(value)
-        if numeric is not None:
-            return numeric
-    return None
-
-
-def _load_common_price_history(ticker: str, *, start_date: str) -> tuple[pd.Series, str | None]:
-    try:
-        prices, source = fetch_krx_close_prices([ticker], start_date)
-    except Exception:
-        return pd.Series(dtype=float), None
-
-    if source == "fallback" or prices.empty or ticker not in prices.columns:
-        return pd.Series(dtype=float), None
-
-    close = pd.Series(prices[ticker], dtype=float).dropna()
-    if close.empty:
-        return pd.Series(dtype=float), None
-
-    close.index = pd.to_datetime(close.index).tz_localize(None)
-    close = close.sort_index()
-    return close, str(source)
-
-
-
-
-    return None
-
-
-
-def _fetch_fmp_metric_overrides(
-    *,
-    ticker: str,
-    verify: bool | str,
-    api_key: str | None,
-) -> tuple[dict[str, object], bool]:
-    key_metrics_ttm = _fmp_get_json("key-metrics-ttm", symbol=ticker, api_key=api_key, verify=verify)
-    ratios_ttm = _fmp_get_json("ratios-ttm", symbol=ticker, api_key=api_key, verify=verify)
-    quote = _fmp_get_json("quote", symbol=ticker, api_key=api_key, verify=verify)
-
-    metrics = {
-        "Market Cap": _first_number(quote, "marketCap") or _first_number(key_metrics_ttm, "marketCapTTM", "marketCap"),
-        "PER (Trailing)": _first_number(quote, "pe") or _first_number(ratios_ttm, "priceEarningsRatioTTM", "priceEarningsRatio") or _first_number(key_metrics_ttm, "peRatioTTM", "peRatio"),
-        "PER (Forward)": _first_number(quote, "forwardPE"),
-        "PBR": _first_number(quote, "priceToBook") or _first_number(ratios_ttm, "priceToBookRatioTTM", "priceToBookRatio") or _first_number(key_metrics_ttm, "pbRatioTTM", "pbRatio"),
-        "EPS (Trailing)": _first_number(quote, "eps") or _first_number(key_metrics_ttm, "netIncomePerShareTTM", "epsTTM"),
-        "ROE": _first_number(ratios_ttm, "returnOnEquityTTM", "returnOnEquity") or _first_number(key_metrics_ttm, "roeTTM", "roe"),
-        "Debt/Equity": _first_number(ratios_ttm, "debtEquityRatioTTM", "debtEquityRatio", "debtToEquityTTM", "debtToEquity"),
-        "Current Ratio": _first_number(ratios_ttm, "currentRatioTTM", "currentRatio"),
-        "Dividend Yield": _first_number(quote, "dividendYield") or _first_number(ratios_ttm, "dividendYieldTTM", "dividendYield"),
-        "52W High": _first_number(quote, "yearHigh", "52WeekHigh"),
-        "52W Low": _first_number(quote, "yearLow", "52WeekLow"),
-    }
-    used = any(value is not None for value in metrics.values())
-    return metrics, used
-
-
-def _merge_missing_metrics(base_metrics: dict[str, object], supplement_metrics: dict[str, object]) -> tuple[dict[str, object], bool]:
-    merged = dict(base_metrics)
-    used = False
-    for key, value in supplement_metrics.items():
-        if merged.get(key) is None and value is not None:
-            merged[key] = value
-            used = True
-    return merged, used
-
-
-def _sec_headers() -> dict[str, str]:
-    return {
-        "User-Agent": "Keumj Stock Forecast Lab/1.0 (finance-data-support@example.com)",
-        "Accept": "application/json",
-    }
-
-
-def _sec_get_json(url: str, *, verify: bool | str) -> dict[str, object] | None:
-    session = requests.Session()
-    try:
-        resp = session.get(url, headers=_sec_headers(), timeout=20, verify=verify)
-        resp.raise_for_status()
-        payload = resp.json()
-    except Exception:
-        return None
-    return payload if isinstance(payload, dict) else None
-
-
-def _sec_find_cik_for_ticker(ticker: str, *, verify: bool | str) -> str | None:
-    payload = _sec_get_json(SEC_TICKERS_URL, verify=verify)
-    if payload is None:
-        return None
-
-    target = ticker.strip().upper()
-    entries = payload.values() if isinstance(payload, dict) else []
-    for item in entries:
-        if not isinstance(item, dict):
-            continue
-        if str(item.get("ticker", "")).strip().upper() != target:
-            continue
-        cik_raw = item.get("cik_str")
-        try:
-            return str(int(cik_raw)).zfill(10)
-        except Exception:
-            return None
-    return None
-
-
-def _sec_pick_series(
-    us_gaap: dict[str, object],
-    concepts: list[str],
-    *,
-    units: tuple[str, ...],
-) -> dict[pd.Timestamp, float]:
-    allowed_forms = {"10-K", "10-Q", "20-F", "40-F"}
-    for concept in concepts:
-        node = us_gaap.get(concept)
-        if not isinstance(node, dict):
-            continue
-        units_node = node.get("units")
-        if not isinstance(units_node, dict):
-            continue
-
-        for unit in units:
-            values = units_node.get(unit)
-            if not isinstance(values, list):
-                continue
-
-            latest_by_end: dict[pd.Timestamp, tuple[str, float]] = {}
-            for row in values:
-                if not isinstance(row, dict):
-                    continue
-                form = str(row.get("form", "")).upper()
-                if form and form not in allowed_forms:
-                    continue
-
-                end_raw = str(row.get("end", "")).strip()
-                value = _to_number(row.get("val"))
-                if not end_raw or value is None:
-                    continue
-
-                try:
-                    end_ts = pd.Timestamp(end_raw).normalize()
-                except Exception:
-                    continue
-
-                filed = str(row.get("filed", ""))
-                prev = latest_by_end.get(end_ts)
-                if prev is None or filed > prev[0]:
-                    latest_by_end[end_ts] = (filed, float(value))
-
-            if latest_by_end:
-                return {k: v for k, (_, v) in latest_by_end.items()}
-
-    return {}
-
-
-def _sec_rows_to_df(rows: dict[str, dict[pd.Timestamp, float]]) -> pd.DataFrame:
-    all_dates = sorted({d for m in rows.values() for d in m.keys()}, reverse=True)
-    if not all_dates:
+def _quarterly_statement_table(quarterly: pd.DataFrame, row_map: dict[str, str], periods: int) -> pd.DataFrame:
+    if quarterly is None or quarterly.empty:
         return pd.DataFrame()
-
-    data: dict[str, dict[pd.Timestamp, float]] = {}
-    for row_name, series in rows.items():
-        if not series:
-            continue
-        data[row_name] = {d: series.get(d, np.nan) for d in all_dates}
-
-    if not data:
+    frame = quarterly.copy()
+    frame["fiscal_date"] = pd.to_datetime(frame["fiscal_date"], errors="coerce")
+    frame = frame.dropna(subset=["fiscal_date"]).sort_values("fiscal_date", ascending=False).head(periods)
+    if frame.empty:
         return pd.DataFrame()
-
-    df = pd.DataFrame(data).T
-    df.columns = pd.to_datetime(df.columns)
-    return _normalize_statement_df(df)
-
-
-def _fetch_sec_statement_frames(
-    *,
-    ticker: str,
-    verify: bool | str,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, str]:
-    cik = _sec_find_cik_for_ticker(ticker, verify=verify)
-    if not cik:
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), ""
-
-    facts_payload = _sec_get_json(SEC_COMPANYFACTS_URL.format(cik=cik), verify=verify)
-    if not facts_payload:
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), ""
-
-    facts = facts_payload.get("facts") if isinstance(facts_payload, dict) else None
-    us_gaap = facts.get("us-gaap") if isinstance(facts, dict) else None
-    if not isinstance(us_gaap, dict):
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), str(facts_payload.get("entityName") or "")
-
-    revenue = _sec_pick_series(us_gaap, ["Revenues", "RevenueFromContractWithCustomerExcludingAssessedTax", "SalesRevenueNet"], units=("USD",))
-    gross_profit = _sec_pick_series(us_gaap, ["GrossProfit"], units=("USD",))
-    operating_income = _sec_pick_series(us_gaap, ["OperatingIncomeLoss"], units=("USD",))
-    net_income = _sec_pick_series(us_gaap, ["NetIncomeLoss", "ProfitLoss"], units=("USD",))
-    diluted_eps = _sec_pick_series(us_gaap, ["EarningsPerShareDiluted"], units=("USD/shares",))
-
-    cash = _sec_pick_series(us_gaap, ["CashAndCashEquivalentsAtCarryingValue", "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents"], units=("USD",))
-    assets = _sec_pick_series(us_gaap, ["Assets"], units=("USD",))
-    current_assets = _sec_pick_series(us_gaap, ["AssetsCurrent"], units=("USD",))
-    liabilities = _sec_pick_series(us_gaap, ["Liabilities"], units=("USD",))
-    current_liabilities = _sec_pick_series(us_gaap, ["LiabilitiesCurrent"], units=("USD",))
-    equity = _sec_pick_series(us_gaap, ["StockholdersEquity", "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest"], units=("USD",))
-    debt = _sec_pick_series(us_gaap, ["Debt", "LongTermDebtAndFinanceLeaseLiabilities", "LongTermDebtNoncurrent", "LongTermDebt"], units=("USD",))
-
-    ocf = _sec_pick_series(us_gaap, ["NetCashProvidedByUsedInOperatingActivities", "NetCashProvidedByUsedInOperatingActivitiesContinuingOperations"], units=("USD",))
-    icf = _sec_pick_series(us_gaap, ["NetCashProvidedByUsedInInvestingActivities", "NetCashProvidedByUsedInInvestingActivitiesContinuingOperations"], units=("USD",))
-    fcfin = _sec_pick_series(us_gaap, ["NetCashProvidedByUsedInFinancingActivities", "NetCashProvidedByUsedInFinancingActivitiesContinuingOperations"], units=("USD",))
-    capex = _sec_pick_series(us_gaap, ["PaymentsToAcquirePropertyPlantAndEquipment", "CapitalExpendituresIncurredButNotYetPaid"], units=("USD",))
-    free_cf: dict[pd.Timestamp, float] = {}
-    for d, v in ocf.items():
-        cap = capex.get(d)
-        if cap is None:
-            continue
-        free_cf[d] = float(v) - abs(float(cap))
-
-    income_df = _sec_rows_to_df(
-        {
-            "Total Revenue": revenue,
-            "Gross Profit": gross_profit,
-            "Operating Income": operating_income,
-            "Net Income": net_income,
-            "Diluted EPS": diluted_eps,
-        }
-    )
-    balance_df = _sec_rows_to_df(
-        {
-            "Cash And Cash Equivalents": cash,
-            "Total Assets": assets,
-            "Total Liabilities Net Minority Interest": liabilities,
-            "Current Assets": current_assets,
-            "Current Liabilities": current_liabilities,
-            "Stockholders Equity": equity,
-            "Total Debt": debt,
-        }
-    )
-    cashflow_df = _sec_rows_to_df(
-        {
-            "Operating Cash Flow": ocf,
-            "Investing Cash Flow": icf,
-            "Financing Cash Flow": fcfin,
-            "Free Cash Flow": free_cf,
-            "Capital Expenditure": capex,
-        }
-    )
-
-    company_name = str(facts_payload.get("entityName") or "")
-    return income_df, balance_df, cashflow_df, company_name
+    rows: list[dict[str, object]] = []
+    for label, col in row_map.items():
+        row: dict[str, object] = {"line_item": label}
+        for _, item in frame.iterrows():
+            key = pd.Timestamp(item["fiscal_date"]).strftime("%Y-%m-%d")
+            row[key] = item.get(col)
+        rows.append(row)
+    return pd.DataFrame(rows)
 
 
-def _build_financial_context_yfinance(
+def _latest_number(frame: pd.DataFrame, col: str) -> float | None:
+    if frame is None or frame.empty or col not in frame.columns:
+        return None
+    values = pd.to_numeric(frame[col], errors="coerce").dropna()
+    if values.empty:
+        return None
+    value = float(values.iloc[0])
+    return value if np.isfinite(value) else None
+
+
+def _build_financial_context_krx(
     *,
     ticker: str,
     periods: int,
     out_dir: Path | None,
     saved_dir: str | None,
     fallback_reason: str | None,
-    ca_bundle_path: str | None,
-    insecure_ssl: bool,
-    overview_fallback: dict[str, object] | None = None,
-    fmp_api_key: str | None = None,
 ) -> _FinancialContext:
-    if yf is None:
-        raise ValueError(
-            "yfinance is not installed. Install yfinance to load online financial data."
-        )
-
-    verify_value = _request_verify_value(ca_bundle_path=ca_bundle_path, insecure_ssl=insecure_ssl)
-
-    yf_session = _build_yfinance_session(ca_bundle=ca_bundle_path, insecure_ssl=insecure_ssl)
-    ticker_obj = yf.Ticker(ticker, session=yf_session)
-
-    try:
-        info = ticker_obj.info or {}
-        info_error: str | None = None
-    except Exception as exc:
-        info = {}
-        info_error = _short_error_message(exc)
-
-    def _safe_statement_df(attr_name: str) -> pd.DataFrame:
-        try:
-            return _normalize_statement_df(getattr(ticker_obj, attr_name, pd.DataFrame()))
-        except Exception:
-            return pd.DataFrame()
-
-    income = _safe_statement_df("income_stmt")
-    if income.empty:
-        income = _safe_statement_df("financials")
-    if income.empty:
-        income = _safe_statement_df("quarterly_income_stmt")
-
-    balance = _safe_statement_df("balance_sheet")
-    if balance.empty:
-        balance = _safe_statement_df("quarterly_balance_sheet")
-
-    cashflow = _safe_statement_df("cashflow")
-    if cashflow.empty:
-        cashflow = _safe_statement_df("quarterly_cashflow")
-
-    sec_company_name = ""
-    used_sec_fallback = False
-    if income.empty and balance.empty and cashflow.empty:
-        sec_income, sec_balance, sec_cashflow, sec_company_name = _fetch_sec_statement_frames(
-            ticker=ticker,
-            verify=verify_value,
-        )
-        if not sec_income.empty:
-            income = sec_income
-        if not sec_balance.empty:
-            balance = sec_balance
-        if not sec_cashflow.empty:
-            cashflow = sec_cashflow
-        used_sec_fallback = not income.empty or not balance.empty or not cashflow.empty
-
-    overview = overview_fallback or {}
-
-    try:
-        fast_info = ticker_obj.fast_info or {}
-    except Exception:
-        fast_info = {}
-    if fast_info and not isinstance(fast_info, dict):
-        try:
-            fast_info = dict(fast_info)
-        except Exception:
-            fast_info = {}
-
-    used_common_price_loader = False
-    try:
-        price_history = ticker_obj.history(period="1y", auto_adjust=False)
-    except Exception:
-        price_history = pd.DataFrame()
-
-    close_series = price_history.get("Close") if isinstance(price_history, pd.DataFrame) else None
-    clean_close = pd.Series(dtype=float)
-    if close_series is not None:
-        clean_close = pd.Series(close_series).dropna()
-
-    if clean_close.empty:
-        fallback_close, _ = _load_common_price_history(
-            ticker,
-            start_date=(pd.Timestamp.today().normalize() - pd.Timedelta(days=370)).strftime("%Y-%m-%d"),
-        )
-        if not fallback_close.empty:
-            clean_close = fallback_close
-            used_common_price_loader = True
-
-    recent_close = None
-    history_52w_high = None
-    history_52w_low = None
-    if not clean_close.empty:
-        recent_close = float(clean_close.iloc[-1])
-        history_52w_high = float(clean_close.max())
-        history_52w_low = float(clean_close.min())
-
-    market_cap = (
-        _to_number(info.get("marketCap"))
-        or _lookup_number(fast_info, "marketCap", "market_cap")
-        or _to_number(overview.get("MarketCapitalization"))
+    quarterly, quarterly_source = load_shared_quarterly_fundamentals_for_symbols(
+        [ticker],
+        limit_per_symbol=max(periods, 4),
     )
-    trailing_eps = _to_number(info.get("trailingEps")) or _to_number(overview.get("EPS"))
-    latest_price = (
-        _lookup_number(info, "currentPrice", "regularMarketPrice", "previousClose")
-        or _lookup_number(fast_info, "lastPrice", "last_price", "regularMarketPrice", "previousClose", "regularMarketPreviousClose")
-        or recent_close
+    close_history, price_source = load_shared_close_prices_for_symbols(
+        [ticker],
+        start_date=(pd.Timestamp.today().normalize() - pd.Timedelta(days=370)).strftime("%Y-%m-%d"),
     )
-    year_high = (
-        _to_number(info.get("fiftyTwoWeekHigh"))
-        or _lookup_number(fast_info, "yearHigh", "year_high")
-        or history_52w_high
-        or _to_number(overview.get("52WeekHigh"))
-    )
-    year_low = (
-        _to_number(info.get("fiftyTwoWeekLow"))
-        or _lookup_number(fast_info, "yearLow", "year_low")
-        or history_52w_low
-        or _to_number(overview.get("52WeekLow"))
+    market_caps, market_cap_source = load_shared_market_caps_for_symbols(
+        [ticker],
+        start_date=(pd.Timestamp.today().normalize() - pd.Timedelta(days=370)).strftime("%Y-%m-%d"),
     )
 
-    latest_eps_stmt = _pick_latest_value_df(income, ["Diluted EPS", "Basic EPS"])
-    ttm_eps_stmt = _pick_ttm_value_df(income, ["Diluted EPS", "Basic EPS"])
-    latest_net_income = _pick_latest_value_df(income, ["Net Income"])
-    ttm_net_income = _pick_ttm_value_df(income, ["Net Income"])
-    latest_equity = _pick_latest_value_df(balance, ["Stockholders Equity", "Total Stockholder Equity"])
-    average_equity = _pick_average_value_df(
-        balance,
-        ["Stockholders Equity", "Total Stockholder Equity"],
-        periods=(4 if _statement_looks_quarterly(balance) else 2),
-    )
-    latest_debt = _pick_latest_value_df(balance, ["Total Debt", "Long Term Debt"])
-    current_assets = _pick_latest_value_df(balance, ["Current Assets", "Total Current Assets"])
-    current_liabilities = _pick_latest_value_df(
-        balance,
-        ["Current Liabilities", "Total Current Liabilities", "Current Debt And Capital Lease Obligation"],
-    )
+    quarterly = quarterly if quarterly is not None else pd.DataFrame()
+    if not quarterly.empty:
+        quarterly["fiscal_date"] = pd.to_datetime(quarterly["fiscal_date"], errors="coerce")
+        quarterly = quarterly.dropna(subset=["fiscal_date"]).sort_values("fiscal_date", ascending=False).reset_index(drop=True)
 
-    implied_shares = _lookup_number(info, "sharesOutstanding", "impliedSharesOutstanding") or _lookup_number(
-        fast_info,
-        "shares",
-        "sharesOutstanding",
-        "shareCount",
-    )
-    if implied_shares is None and latest_eps_stmt not in (None, 0) and latest_net_income is not None:
-        implied_shares = abs(float(latest_net_income) / float(latest_eps_stmt))
-    if implied_shares is None and ttm_eps_stmt not in (None, 0) and ttm_net_income is not None:
-        implied_shares = abs(float(ttm_net_income) / float(ttm_eps_stmt))
+    close = pd.Series(dtype=float)
+    if close_history is not None and ticker in close_history.columns:
+        close = pd.to_numeric(close_history[ticker], errors="coerce").dropna().sort_index()
+    caps = pd.Series(dtype=float)
+    if market_caps is not None and ticker in market_caps.columns:
+        caps = pd.to_numeric(market_caps[ticker], errors="coerce").dropna().sort_index()
+
+    latest_price = float(close.iloc[-1]) if not close.empty else None
+    market_cap = float(caps.iloc[-1]) if not caps.empty else None
+    year_high = float(close.max()) if not close.empty else None
+    year_low = float(close.min()) if not close.empty else None
+
+    latest = quarterly.iloc[0] if not quarterly.empty else pd.Series(dtype=object)
+    ttm_rows = quarterly.head(4) if not quarterly.empty else pd.DataFrame()
+    ttm_net_income = pd.to_numeric(ttm_rows.get("net_income"), errors="coerce").dropna().sum(min_count=1) if not ttm_rows.empty else np.nan
+    ttm_eps = pd.to_numeric(ttm_rows.get("diluted_eps"), errors="coerce").dropna().sum(min_count=1) if not ttm_rows.empty else np.nan
+    average_equity = pd.to_numeric(ttm_rows.get("stockholders_equity"), errors="coerce").dropna().mean() if not ttm_rows.empty else np.nan
+    latest_equity = _latest_number(quarterly, "stockholders_equity")
+    latest_debt = _latest_number(quarterly, "total_debt")
+    current_assets = _latest_number(quarterly, "current_assets")
+    current_liabilities = _latest_number(quarterly, "current_liabilities")
 
     metrics = {
         "Market Cap": market_cap,
-        "PER (Trailing)": _to_number(info.get("trailingPE")) or _to_number(overview.get("PERatio")),
-        "PER (Forward)": _to_number(info.get("forwardPE")) or _to_number(overview.get("ForwardPE")),
-        "PBR": _to_number(info.get("priceToBook")) or _to_number(overview.get("PriceToBookRatio")),
-        "EPS (Trailing)": trailing_eps,
-        "ROE": _to_number(info.get("returnOnEquity")) or _to_number(overview.get("ReturnOnEquityTTM")),
-        "Debt/Equity": _to_number(info.get("debtToEquity")) or _to_number(overview.get("DebtToEquity")),
-        "Current Ratio": _to_number(info.get("currentRatio")) or _to_number(overview.get("CurrentRatio")),
-        "Dividend Yield": _to_number(info.get("dividendYield")) or _to_number(overview.get("DividendYield")),
+        "PER (Trailing)": (latest_price / float(ttm_eps)) if latest_price is not None and np.isfinite(ttm_eps) and float(ttm_eps) != 0 else None,
+        "PER (Forward)": None,
+        "PBR": (market_cap / latest_equity) if market_cap is not None and latest_equity not in (None, 0) else None,
+        "EPS (Trailing)": float(ttm_eps) if np.isfinite(ttm_eps) else None,
+        "ROE": (float(ttm_net_income) / float(average_equity)) if np.isfinite(ttm_net_income) and np.isfinite(average_equity) and float(average_equity) != 0 else None,
+        "Debt/Equity": ((latest_debt / latest_equity) * 100.0) if latest_debt is not None and latest_equity not in (None, 0) else None,
+        "Current Ratio": (current_assets / current_liabilities) if current_assets is not None and current_liabilities not in (None, 0) else None,
+        "Dividend Yield": None,
         "52W High": year_high,
         "52W Low": year_low,
     }
-    fmp_metrics, _ = _fetch_fmp_metric_overrides(
-        ticker=ticker,
-        verify=verify_value,
-        api_key=_resolve_fmp_api_key(fmp_api_key),
-    )
-    metrics, used_fmp = _merge_missing_metrics(metrics, fmp_metrics)
-
-    derived_market_cap = (
-        float(latest_price) * float(implied_shares)
-        if metrics.get("Market Cap") is None and latest_price is not None and implied_shares is not None
-        else None
-    )
-    effective_market_cap = metrics.get("Market Cap") if metrics.get("Market Cap") is not None else derived_market_cap
-
-    derived_metrics: dict[str, object] = {
-        "Market Cap": derived_market_cap,
-        "PER (Trailing)": (float(latest_price) / float(ttm_eps_stmt)) if metrics.get("PER (Trailing)") is None and latest_price is not None and ttm_eps_stmt not in (None, 0) else None,
-        "PBR": (float(effective_market_cap) / float(latest_equity)) if metrics.get("PBR") is None and effective_market_cap is not None and latest_equity not in (None, 0) else None,
-        "EPS (Trailing)": ttm_eps_stmt if metrics.get("EPS (Trailing)") is None else None,
-        "ROE": (float(ttm_net_income) / float(average_equity)) if metrics.get("ROE") is None and ttm_net_income is not None and average_equity not in (None, 0) else None,
-        "Debt/Equity": ((float(latest_debt) / float(latest_equity)) * 100.0) if metrics.get("Debt/Equity") is None and latest_debt is not None and latest_equity not in (None, 0) else None,
-        "Current Ratio": (float(current_assets) / float(current_liabilities)) if metrics.get("Current Ratio") is None and current_assets is not None and current_liabilities not in (None, 0) else None,
-        "52W High": history_52w_high if metrics.get("52W High") is None else None,
-        "52W Low": history_52w_low if metrics.get("52W Low") is None else None,
-    }
-    metrics, used_derived = _merge_missing_metrics(metrics, derived_metrics)
-    provider_status_table = _build_financial_provider_status_table(
-        yfinance_info=("ok" if bool(info) else f"error: {info_error}" if info_error else "empty"),
-        yfinance_statements="ok" if not (income.empty and balance.empty and cashflow.empty) else "empty",
-        price_history="ok" if not price_history.empty else ("shared_sql" if used_common_price_loader else "empty"),
-        sec_fallback="used" if used_sec_fallback else ("not needed" if not (income.empty and balance.empty and cashflow.empty) else "not available"),
-        fmp_metrics="used" if used_fmp else "not used",
-        derived_metrics="used" if used_derived else "not used",
-    )
-
-    income_table = _statement_preview_from_df(
-        income,
-        row_map={
-            "Revenue": ["Total Revenue", "Revenue"],
-            "Gross Profit": ["Gross Profit"],
-            "Operating Income": ["Operating Income"],
-            "Net Income": ["Net Income"],
-            "Diluted EPS": ["Diluted EPS", "Basic EPS"],
+    income_table = _quarterly_statement_table(
+        quarterly,
+        {
+            "Revenue": "revenue",
+            "Operating Income": "operating_income",
+            "Net Income": "net_income",
+            "Diluted EPS": "diluted_eps",
         },
-        periods=periods,
+        periods,
     )
-    balance_table = _statement_preview_from_df(
-        balance,
-        row_map={
-            "Cash": ["Cash And Cash Equivalents", "Cash"],
-            "Total Assets": ["Total Assets"],
-            "Total Liabilities": ["Total Liabilities Net Minority Interest", "Total Liab"],
-            "Stockholders Equity": ["Stockholders Equity", "Total Stockholder Equity"],
-            "Total Debt": ["Total Debt", "Long Term Debt"],
+    balance_table = _quarterly_statement_table(
+        quarterly,
+        {
+            "Total Assets": "total_assets",
+            "Total Liabilities": "total_liabilities",
+            "Stockholders Equity": "stockholders_equity",
+            "Total Debt": "total_debt",
         },
-        periods=periods,
+        periods,
     )
-    cashflow_table = _statement_preview_from_df(
-        cashflow,
-        row_map={
-            "Operating Cash Flow": ["Operating Cash Flow"],
-            "Investing Cash Flow": ["Investing Cash Flow"],
-            "Financing Cash Flow": ["Financing Cash Flow"],
-            "Free Cash Flow": ["Free Cash Flow"],
-            "Capital Expenditure": ["Capital Expenditure"],
+    cashflow_table = _quarterly_statement_table(
+        quarterly,
+        {
+            "Operating Cash Flow": "operating_cash_flow",
+            "Free Cash Flow": "free_cash_flow",
+            "Capital Expenditure": "capex",
         },
-        periods=periods,
+        periods,
     )
-
     summary_table = pd.DataFrame(
         [
-            {
-                "line_item": "Revenue",
-                "latest_value": _format_fin_value(_pick_latest_value_df(income, ["Total Revenue", "Revenue"])),
-            },
-            {
-                "line_item": "Operating Income",
-                "latest_value": _format_fin_value(_pick_latest_value_df(income, ["Operating Income"])),
-            },
-            {
-                "line_item": "Net Income",
-                "latest_value": _format_fin_value(_pick_latest_value_df(income, ["Net Income"])),
-            },
-            {
-                "line_item": "Total Assets",
-                "latest_value": _format_fin_value(_pick_latest_value_df(balance, ["Total Assets"])),
-            },
-            {
-                "line_item": "Total Liabilities",
-                "latest_value": _format_fin_value(
-                    _pick_latest_value_df(balance, ["Total Liabilities Net Minority Interest", "Total Liab"])
-                ),
-            },
-            {
-                "line_item": "Operating Cash Flow",
-                "latest_value": _format_fin_value(_pick_latest_value_df(cashflow, ["Operating Cash Flow"])),
-            },
-            {
-                "line_item": "Free Cash Flow",
-                "latest_value": _format_fin_value(_pick_latest_value_df(cashflow, ["Free Cash Flow"])),
-            },
+            {"line_item": "Revenue", "latest_value": _format_fin_value(latest.get("revenue"))},
+            {"line_item": "Operating Income", "latest_value": _format_fin_value(latest.get("operating_income"))},
+            {"line_item": "Net Income", "latest_value": _format_fin_value(latest.get("net_income"))},
+            {"line_item": "Total Assets", "latest_value": _format_fin_value(latest.get("total_assets"))},
+            {"line_item": "Total Liabilities", "latest_value": _format_fin_value(latest.get("total_liabilities"))},
+            {"line_item": "Operating Cash Flow", "latest_value": _format_fin_value(latest.get("operating_cash_flow"))},
+            {"line_item": "Free Cash Flow", "latest_value": _format_fin_value(latest.get("free_cash_flow"))},
         ]
     )
 
-    no_statements = income_table.empty and balance_table.empty and cashflow_table.empty
-    if no_statements and not any(v is not None for v in metrics.values()):
-        raise ValueError(
-            "yfinance and SEC financial data were unavailable for this ticker. Wait a few minutes and retry."
-        )
+    if quarterly.empty and latest_price is None and market_cap is None:
+        raise ValueError(f"No KRX shared SQLite financial or price data found for '{ticker}'. Refresh KRX data first.")
 
-    extra_sources: list[str] = []
-    if used_sec_fallback:
-        extra_sources.append("sec_companyfacts")
-    if used_fmp:
-        extra_sources.append("fmp_metrics")
-    if used_derived:
-        extra_sources.append("derived_metrics")
+    provider_status_table = _build_financial_provider_status_table(
+        krx_security_master="ok" if _krx_company_name(ticker) != ticker else "missing_name",
+        krx_quarterly_fundamentals="ok" if not quarterly.empty else "empty",
+        price_history="ok" if latest_price is not None else "empty",
+        market_cap_history="ok" if market_cap is not None else "empty",
+        external_provider="not used",
+        derived_metrics="used" if any(v is not None for v in metrics.values()) else "not used",
+    )
 
     if out_dir is not None:
-        _metrics_table(metrics).to_csv(out_dir / "financial_metrics.csv", index=False)
-        summary_table.to_csv(out_dir / "financial_summary.csv", index=False)
-        if not income.empty:
-            income.to_csv(out_dir / "income_statement_raw.csv")
-        if not balance.empty:
-            balance.to_csv(out_dir / "balance_sheet_raw.csv")
-        if not cashflow.empty:
-            cashflow.to_csv(out_dir / "cashflow_statement_raw.csv")
-        source_note = "source=yfinance\n"
-        for idx, source_name in enumerate(extra_sources, start=2):
-            source_note += f"source{idx}={source_name}\n"
-        if fallback_reason:
-            source_note += f"reason={fallback_reason}\n"
-        if no_statements:
-            source_note += "warning=statement_data_unavailable_provider_limits\n"
-        (out_dir / "financial_source.txt").write_text(source_note, encoding="utf-8")
+        _metrics_table(metrics).to_csv(out_dir / "financial_metrics.csv", index=False, encoding="utf-8-sig")
+        summary_table.to_csv(out_dir / "financial_summary.csv", index=False, encoding="utf-8-sig")
+        quarterly.to_csv(out_dir / "krx_quarterly_fundamentals_raw.csv", index=False, encoding="utf-8-sig")
+        (out_dir / "financial_source.txt").write_text(
+            "source=krx_shared_sqlite\n"
+            f"quarterly_source={quarterly_source or '-'}\n"
+            f"price_source={price_source or '-'}\n"
+            f"market_cap_source={market_cap_source or '-'}\n",
+            encoding="utf-8",
+        )
 
     return _FinancialContext(
         ticker=ticker,
-        company_name=str(
-            info.get("longName")
-            or info.get("shortName")
-            or sec_company_name
-            or overview.get("Name")
-            or overview.get("Symbol")
-            or ticker
-        ),
-        currency=str(info.get("currency") or overview.get("Currency") or ""),
+        company_name=_krx_company_name(ticker),
+        currency="KRW",
         metrics=metrics,
         summary_table=summary_table,
         income_table=income_table,
@@ -4058,11 +3536,11 @@ def _build_financial_context_yfinance(
         saved_dir=saved_dir,
         source_table=_build_financial_source_table(
             ticker=ticker,
-            primary_source="yfinance",
-            secondary_source=extra_sources[0] if len(extra_sources) > 0 else None,
-            tertiary_source=extra_sources[1] if len(extra_sources) > 1 else None,
+            primary_source="krx_shared_sqlite",
+            secondary_source=quarterly_source,
+            tertiary_source=price_source or market_cap_source,
             reason=fallback_reason,
-            warning="statement_data_unavailable_provider_limits" if no_statements else None,
+            warning="quarterly_fundamentals_missing" if quarterly.empty else None,
         ),
         provider_status_table=provider_status_table,
     )
@@ -4090,16 +3568,12 @@ def _run_financial_once(form: dict[str, str]) -> _FinancialContext:
         ensure_writable_dir(out_dir)
         saved_dir = str(out_dir)
 
-    return _build_financial_context_yfinance(
+    return _build_financial_context_krx(
         ticker=ticker,
         periods=periods,
         out_dir=out_dir,
         saved_dir=saved_dir,
         fallback_reason=None,
-        ca_bundle_path=ca_bundle_path,
-        insecure_ssl=insecure_ssl,
-        overview_fallback=None,
-        fmp_api_key=form.get("fmp_api_key", "").strip() or None,
     )
 
 
@@ -4566,7 +4040,6 @@ def _html_financial_page(
         "statement_periods": form.get("statement_periods", "4"),
         "output_dir": form.get("output_dir", "outputs/stock_forecast_finance"),
         "ca_bundle_path": form.get("ca_bundle_path", ""),
-        "fmp_api_key": form.get("fmp_api_key", ""),
     }
     auto_save_checked = "checked" if form.get("auto_save", "on") == "on" else ""
     insecure_ssl_checked = "checked" if form.get("insecure_ssl", "") == "on" else ""
@@ -4638,7 +4111,6 @@ def _html_financial_page(
         <div><label>조회 기간 수</label><input type="number" min="1" name="statement_periods" value="{html.escape(defaults["statement_periods"])}" /></div>
         <div><label>출력 기본 폴더</label><input type="text" name="output_dir" value="{html.escape(defaults["output_dir"])}" /></div>
         <div><label>CA 번들 경로(선택)</label><input type="text" name="ca_bundle_path" value="{html.escape(defaults["ca_bundle_path"])}" /></div>
-        <div><label>FMP API 키(선택)</label><input type="text" name="fmp_api_key" value="{html.escape(defaults["fmp_api_key"])}" /></div>
       </div>
       <div class="row">
         <label><input type="checkbox" name="auto_save" {auto_save_checked} /> 결과 자동 저장</label>
@@ -5653,7 +5125,6 @@ def launch_stock_forecast_web_gui(
             "auto_save": "on",
             "insecure_ssl": "",
             "ca_bundle_path": "",
-            "fmp_api_key": "",
         }
         state_fin_ctx: _FinancialContext | None = None
         state_fin_error: str | None = None
@@ -5769,7 +5240,7 @@ def launch_stock_forecast_web_gui(
                 )
                 return
 
-            # 외부 티커 요청 처리 (예: ?ticker=AAPL&intent=run)
+            # 외부 티커 요청 처리 (예: ?ticker=005930&intent=run)
             ticker_arg = query.get("ticker", [None])[0] # This logic needs to be moved to main web_gui
             if ticker_arg and path in {"/", "/index.html", "/forecast", "/page1", "/page6", "/decision"}:
                 clean_t = ticker_arg.strip().upper()
@@ -5982,7 +5453,6 @@ def launch_stock_forecast_web_gui(
                     fin_form.get("statement_periods", "4").strip() or "4",
                     fin_form.get("ca_bundle_path", "").strip(),
                     fin_form.get("insecure_ssl", "").strip(),
-                    _resolve_fmp_api_key(fin_form.get("fmp_api_key", "")) or "",
                 ]
             )
 
@@ -6045,7 +5515,6 @@ def launch_stock_forecast_web_gui(
                     "auto_save": cls.state_fin_form.get("auto_save", cls.state_form.get("auto_save", "on")),
                     "insecure_ssl": cls.state_fin_form.get("insecure_ssl", cls.state_form.get("insecure_ssl", "")),
                     "ca_bundle_path": cls.state_fin_form.get("ca_bundle_path", cls.state_form.get("ca_bundle_path", "")),
-                    "fmp_api_key": cls.state_fin_form.get("fmp_api_key", ""),
                 }
             else:
                 cls.state_fin_form = {
@@ -6203,7 +5672,6 @@ def launch_stock_forecast_web_gui(
                 "auto_save": form.get("auto_save", ""),
                 "insecure_ssl": form.get("insecure_ssl", ""),
                 "ca_bundle_path": form.get("ca_bundle_path", ""),
-                "fmp_api_key": form.get("fmp_api_key", ""),
             }
             entered_ticker = self.state_fin_form.get("ticker", "").strip().upper()
             if entered_ticker:

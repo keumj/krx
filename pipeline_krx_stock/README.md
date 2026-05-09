@@ -48,7 +48,7 @@ or:
 ## CLI
 
 ```powershell
-.venv\Scripts\python.exe -m pipeline_krx_stock --ticker AAPL --forecast-horizon 10 --out-dir outputs\stock_forecast
+.venv\Scripts\python.exe -m pipeline_krx_stock --ticker 005930 --forecast-horizon 10 --out-dir outputs\stock_forecast
 ```
 
 Local CSV override mode:
