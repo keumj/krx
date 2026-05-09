@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from .shared_sp500_prices_sql import (
+from .shared_krx_prices_sql import (
     load_shared_close_prices_for_symbols,
     load_shared_market_caps_for_symbols,
     load_shared_quarterly_fundamentals_for_symbols,

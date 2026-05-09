@@ -6,7 +6,7 @@ import traceback
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from pipeline_stock import web_gui as stock_web
+from pipeline_krx_stock import web_gui as stock_web
 
 from app.web import add_start_page_link, inject_busy_cursor_overlay, rewrite_links
 

@@ -7,8 +7,8 @@ from typing import Callable
 
 from bs4 import BeautifulSoup
 
-from pipeline_portfolio import web_gui as portfolio_web
-from pipeline_portfolio.analysis import (
+from pipeline_krx_portfolio import web_gui as portfolio_web
+from pipeline_krx_portfolio.analysis import (
     DEFAULT_CASH_BUFFER_PCT,
     DEFAULT_LOOKBACK_DAYS,
     DEFAULT_MAX_POSITION_PCT,

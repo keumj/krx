@@ -14,7 +14,7 @@ from .shared_sp500_prices_sql import (
     load_financial_market_frame,
     load_financial_market_series,
 )
-from .shared_sp500_prices_sql import load_shared_close_prices_for_symbols
+from .shared_krx_prices_sql import load_shared_close_prices_for_symbols
 
 try:
     from fredapi import Fred
@@ -74,16 +74,16 @@ def _running_on_render() -> bool:
     return bool(os.getenv("RENDER") or os.getenv("RENDER_SERVICE_ID"))
 
 
-def _sp500_local_csv_fallback_enabled() -> bool:
+def _krx_local_csv_fallback_enabled() -> bool:
     # Render can run with only the shared SQLite file plus the small components
     # CSV. Local/dev keeps the historical CSV fallback unless explicitly off.
-    return _env_bool("KEUMJ_SP500_LOCAL_CSV_FALLBACK", not _running_on_render())
+    return _env_bool("KEUMJ_KRX_LOCAL_CSV_FALLBACK", not _running_on_render())
 
 
-def _sp500_synthetic_fallback_enabled() -> bool:
+def _krx_synthetic_fallback_enabled() -> bool:
     # Synthetic data is useful for notebooks/dev demos, but hosted analysis
     # should surface missing production data instead of silently inventing it.
-    return _env_bool("KEUMJ_SP500_SYNTHETIC_FALLBACK", not _running_on_render())
+    return _env_bool("KEUMJ_KRX_SYNTHETIC_FALLBACK", not _running_on_render())
 
 
 
@@ -648,24 +648,24 @@ def _safe_symbol_filename(symbol: str) -> str:
     return re.sub(r"[^A-Z0-9._-]+", "_", str(symbol).strip().upper())
 
 
-def _sp500_shared_db_root() -> Path:
-    return Path(os.getenv("KEUMJ_SP500_DB_DIR", "data/sp500_shared_db"))
+def _krx_shared_db_root() -> Path:
+    return Path(os.getenv("KEUMJ_KRX_DB_DIR", "data/krx_shared_db"))
 
 
-def _sp500_shared_prices_dir() -> Path:
-    return _sp500_shared_db_root() / "prices"
+def _krx_shared_prices_dir() -> Path:
+    return _krx_shared_db_root() / "prices"
 
 
-def _sp500_shared_start_date() -> pd.Timestamp:
-    raw = str(os.getenv("KEUMJ_SP500_DB_START_DATE", "2015-12-31")).strip() or "2015-12-31"
+def _krx_shared_start_date() -> pd.Timestamp:
+    raw = str(os.getenv("KEUMJ_KRX_DB_START_DATE", "2015-12-31")).strip() or "2015-12-31"
     try:
         return pd.Timestamp(raw).normalize()
     except Exception:
         return pd.Timestamp("2015-12-31")
 
 
-def _sp500_shared_symbol_path(symbol: str) -> Path:
-    return _sp500_shared_prices_dir() / f"{_safe_symbol_filename(symbol)}.csv"
+def _krx_shared_symbol_path(symbol: str) -> Path:
+    return _krx_shared_prices_dir() / f"{_safe_symbol_filename(symbol)}.csv"
 
 
 def _load_prices_shared_db(symbols: list[str], start_date: str) -> tuple[pd.DataFrame | None, str | None]:
@@ -745,7 +745,7 @@ def fetch_sp500_close_prices(symbols: list[str], start_date: str) -> tuple[pd.Da
     if shared_cached_df is not None:
         return shared_cached_df, shared_cached_src or "shared_db"
 
-    if _sp500_local_csv_fallback_enabled():
+    if _krx_local_csv_fallback_enabled():
         local_wide_df, local_wide_src = _load_prices_wide_local(normalized_symbols, start_date)
         if local_wide_df is not None:
             return local_wide_df, local_wide_src or "local_csv"
@@ -754,7 +754,7 @@ def fetch_sp500_close_prices(symbols: list[str], start_date: str) -> tuple[pd.Da
         if local_panel_df is not None:
             return local_panel_df, local_panel_src or "local_csv"
 
-    if not _sp500_synthetic_fallback_enabled():
+    if not _krx_synthetic_fallback_enabled():
         return pd.DataFrame(columns=normalized_symbols), "unavailable:shared_sqlite_missing_or_empty"
 
     rng = np.random.default_rng(123)
@@ -792,7 +792,7 @@ def load_krx_components(max_symbols: int | None = None, *, components_csv: str |
         if max_symbols is not None and int(max_symbols) > 0:
             out = out.head(int(max_symbols)).reset_index(drop=True)
         return out, f"csv:{path.as_posix()}"
-    return load_sp500_components(max_symbols=max_symbols or 0)
+    return pd.DataFrame(columns=["Symbol", "Sector"]), "unavailable:krx_components_missing"
 
 
 def fetch_krx_close_prices(symbols: list[str], start_date: str) -> tuple[pd.DataFrame, str]:
@@ -804,7 +804,7 @@ def fetch_krx_close_prices(symbols: list[str], start_date: str) -> tuple[pd.Data
     shared_cached_df, shared_cached_src = load_shared_close_prices_for_symbols(normalized_symbols, start_date=start_date)
     if shared_cached_df is not None and not shared_cached_df.empty:
         return shared_cached_df, shared_cached_src or "krx_shared_db"
-    return fetch_sp500_close_prices(symbols, start_date)
+    return pd.DataFrame(columns=normalized_symbols), "unavailable:krx_shared_sqlite_missing_or_empty"
 
 
 __all__ = [
@@ -817,4 +817,6 @@ __all__ = [
     "load_index_series",
     "load_sp500_components",
     "fetch_sp500_close_prices",
+    "load_krx_components",
+    "fetch_krx_close_prices",
 ]

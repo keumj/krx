@@ -1,7 +1,7 @@
 """Shared helpers across pipeline packages."""
 
 from .security import configure_ssl, ensure_writable_dir, security_hint
-from .shared_sp500_prices_sql import (
+from .shared_krx_prices_sql import (
     NEWS_ANALYSIS_STATUS_DONE,
     NEWS_ANALYSIS_STATUS_FAILED,
     NEWS_ANALYSIS_STATUS_PENDING,

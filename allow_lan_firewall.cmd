@@ -7,5 +7,5 @@ if %ERRORLEVEL% neq 0 (
 
 if "%KEUMJM_PORT%"=="" set KEUMJM_PORT=8515
 
-netsh advfirewall firewall add rule name="Keumjm Portfolio Lab LAN %KEUMJM_PORT%" dir=in action=allow protocol=TCP localport=%KEUMJM_PORT% profile=private
+netsh advfirewall firewall add rule name="Keumj KRX Lab LAN %KEUMJM_PORT%" dir=in action=allow protocol=TCP localport=%KEUMJM_PORT% profile=private
 echo Firewall rule added for TCP port %KEUMJM_PORT% on the Private network profile.

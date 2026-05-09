@@ -8,14 +8,14 @@ from pathlib import Path
 from typing import Any
 
 from app.settings import settings
-from pipeline_common.shared_sp500_prices_sql import shared_prices_sqlite_path
-from pipeline_macro.macro_data_store import DEFAULT_MACRO_DB_PATH
+from pipeline_common.shared_krx_prices_sql import shared_prices_sqlite_path
+from pipeline_krx_macro.macro_data_store import DEFAULT_MACRO_DB_PATH
 
 
 STATE_RELATIVE_PATH = Path("outputs") / "refresh_state.json"
 SCHEDULER_LOG_RELATIVE_PATH = Path("outputs") / "refresh_local_data_scheduler.log"
 TRACKED_REFRESH_TARGETS = (
-    "data/sp500_shared_db/sp500_shared_prices.sqlite",
+    "data/krx_shared_db/krx_shared_prices.sqlite",
     "data/macro_prices.sqlite",
 )
 STALE_RUNNING_SECONDS = 8 * 60 * 60
@@ -121,7 +121,7 @@ def collect_git_status(root: Path | None = None) -> dict[str, Any]:
 
 def collect_data_status(root: Path | None = None) -> dict[str, Any]:
     root_dir = root or settings.project_root
-    shared_sqlite = _resolve_root_path(root_dir, shared_prices_sqlite_path(root_dir / "data" / "sp500_shared_db"))
+    shared_sqlite = _resolve_root_path(root_dir, shared_prices_sqlite_path(root_dir / "data" / "krx_shared_db"))
     macro_sqlite = _resolve_root_path(root_dir, DEFAULT_MACRO_DB_PATH)
 
     prices = _sqlite_fetchone(shared_sqlite, "SELECT MAX(date), COUNT(*), COUNT(DISTINCT symbol) FROM prices")
@@ -129,7 +129,7 @@ def collect_data_status(root: Path | None = None) -> dict[str, Any]:
         shared_sqlite,
         "SELECT MAX(fiscal_date), COUNT(*), COUNT(DISTINCT symbol), MAX(updated_at) FROM fundamentals_quarterly",
     )
-    news = _sqlite_fetchone(shared_sqlite, "SELECT MAX(publish_date), COUNT(*), COUNT(DISTINCT ticker) FROM news_articles")
+    news = _sqlite_fetchone(shared_sqlite, "SELECT MAX(publish_date), COUNT(*), COUNT(DISTINCT symbol) FROM news_articles")
     macro = _sqlite_fetchone(macro_sqlite, "SELECT MAX(date), COUNT(*), COUNT(DISTINCT series_id) FROM macro_series")
 
     return {

@@ -64,8 +64,8 @@ python -m uvicorn app.main:app --host 0.0.0.0 --port 8515
 
 ## Ownership
 
-- `pipeline_portfolio`, `pipeline_stock`, `pipeline_stock_news`, and
-  `pipeline_common` remain the analytics/runtime modules.
+- `pipeline_krx_portfolio`, `pipeline_krx_stock`, `pipeline_krx_stock_news`,
+  `pipeline_krx_macro`, and `pipeline_common` remain the analytics/runtime modules.
 - `app/services/*` are thin wrappers that hold web state, call pipeline
   functions, and adapt existing HTML to the new URL structure.
 - `app/routers/*` define the web and API routes for the single-port service.

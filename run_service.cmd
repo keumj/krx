@@ -1,6 +1,7 @@
 @echo off
 setlocal
 set PYTHONUTF8=1
+if "%ENABLE_MACRO%"=="" set ENABLE_MACRO=1
 
 if exist ".venv\Scripts\python.exe" (
   ".venv\Scripts\python.exe" scripts\run_uvicorn.py

@@ -18,6 +18,7 @@ copulas
 pillow
 cryptography
 libsql
+beautifulsoup4
 
 requests
 nbformat

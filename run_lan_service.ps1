@@ -40,7 +40,7 @@ if (-not $env:KEUMJM_ACCESS_MODE) { $env:KEUMJM_ACCESS_MODE = "lan" }
 if (-not $env:KEUMJM_HOST) { $env:KEUMJM_HOST = "0.0.0.0" }
 if (-not $env:KEUMJM_PORT) { $env:KEUMJM_PORT = "8515" }
 if (-not $env:KEUMJM_AUTH_ENABLED) { $env:KEUMJM_AUTH_ENABLED = "0" }
-if (-not $env:ENABLE_MACRO) { $env:ENABLE_MACRO = "0" }
+if (-not $env:ENABLE_MACRO) { $env:ENABLE_MACRO = "1" }
 
 $python = "python"
 if (Test-Path ".venv\Scripts\python.exe") {
@@ -52,7 +52,7 @@ $addresses = Get-NetIPAddress -AddressFamily IPv4 |
   Select-Object -ExpandProperty IPAddress
 
 Write-Host ""
-Write-Host "Keumjm Portfolio Lab LAN mode"
+Write-Host "Keumj KRX Lab LAN mode"
 Write-Host "Local:   http://localhost:$env:KEUMJM_PORT"
 foreach ($address in $addresses) {
   Write-Host "LAN:     http://${address}:$env:KEUMJM_PORT"

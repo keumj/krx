@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import traceback
 
-from pipeline_macro import web_gui as macro_web
+from pipeline_krx_macro import web_gui as macro_web
 
 from app.web import shell
 

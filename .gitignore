@@ -16,12 +16,18 @@ data/users/
 
 data/.yfinance_tz_cache/
 data/.yfinance_cache/
+data/sp500_shared_db/
 
-# Generated S&P 500 refresh snapshots. Render reads the shared SQLite DB instead.
-data/sp500_all_metrics_prices.csv
-data/sp500_close_prices.csv
-data/sp500_market_caps.csv
-data/sp500_shares.csv
+# Generated KRX refresh snapshots. Render reads the shared SQLite DB instead.
+data/*_all_metrics_prices.csv
+data/krx_close_prices.csv
+data/krx_market_caps.csv
+data/krx_prices_panel.csv
+data/krx_shares.csv
+data/krx_components.csv
+data/*_close_prices.csv
+data/*_market_caps.csv
+data/*_shares.csv
 
 # Data directory cleanup: ignore all sqlite and large csv files
 #data/krx_market_caps.csv
@@ -35,14 +41,10 @@ data/portfolio/**
 data/macro_prices.sqlite
 
 # Keep essential config files if any (example)
-#!data/sp500_components_full.csv
+#!data/krx_components.csv
 
 data/test_tmp_*/
 data/tmp*/
 **/test_tmp_*/
 **/tmp*/
 tmpgzeyvcrs/
-
-# Local-only data refresh helper.
-refresh_local_data.cmd
-scripts/refresh_status.py

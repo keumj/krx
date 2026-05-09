@@ -49,4 +49,5 @@ if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
 echo.
 echo Setup complete. Run:
 echo   run_service.cmd
+echo   or run_lan_service.cmd for KRX LAN mode
 exit /b 0

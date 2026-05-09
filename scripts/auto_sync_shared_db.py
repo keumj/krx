@@ -9,7 +9,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_TARGETS = [
-    Path("data/sp500_shared_db/sp500_shared_prices.sqlite"),
+    Path("data/krx_shared_db/krx_shared_prices.sqlite"),
     Path("data/macro_prices.sqlite"),
 ]
 
@@ -40,7 +40,7 @@ def _print(msg: str) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Commit and push only refreshed SQLite artifacts.")
+    parser = argparse.ArgumentParser(description="Commit and push only refreshed KRX SQLite artifacts.")
     parser.add_argument("--remote", default="origin")
     parser.add_argument("--branch", default="")
     parser.add_argument("--message", default="")

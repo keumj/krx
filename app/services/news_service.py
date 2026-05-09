@@ -4,7 +4,7 @@ import threading
 import traceback
 from dataclasses import dataclass, field
 
-from pipeline_stock_news import web_gui as news_web
+from pipeline_krx_stock_news import web_gui as news_web
 
 from app.web import add_start_page_link, inject_busy_cursor_overlay, rewrite_links
 

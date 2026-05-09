@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import html
 import sqlite3
@@ -13,7 +13,7 @@ import pandas as pd
 from app.settings import settings
 from app.services import refresh_state
 from app.web import shell
-from pipeline_portfolio import web_gui as portfolio_web
+from pipeline_krx_portfolio import web_gui as portfolio_web
 
 
 @dataclass(frozen=True)
@@ -40,19 +40,19 @@ class JobState:
 
 JOB_TEXTS = {
     "stock": {
-        "label": "S&P 500 가격/시총",
+        "label": "KRX 가격/시총",
         "button_label": "가격/시총 갱신",
-        "description": "원본 가격 갱신 모듈을 실행해 가격 CSV, 시가총액 CSV, shared SQLite 가격 테이블을 갱신합니다.",
+        "description": "KRX 가격 갱신 모듈을 실행해 가격 CSV, 시가총액 CSV, shared SQLite 가격 테이블을 갱신합니다.",
     },
     "quarterly": {
-        "label": "분기 재무",
-        "button_label": "분기 재무 갱신",
-        "description": "원본 분기 재무 갱신 모듈을 실행해 shared SQLite의 fundamentals_quarterly 테이블을 갱신합니다.",
+        "label": "KRX DART 분기재무",
+        "button_label": "분기재무 갱신",
+        "description": "KRX DART 분기재무 갱신 모듈을 실행해 shared SQLite의 fundamentals_quarterly 테이블을 갱신합니다.",
     },
     "news": {
-        "label": "뉴스",
+        "label": "KRX 뉴스",
         "button_label": "뉴스 갱신",
-        "description": "원본 뉴스 갱신 모듈을 실행해 S&P 500 뉴스 기사와 분석 대기열을 적재합니다.",
+        "description": "KRX 뉴스 갱신 모듈을 실행해 뉴스 기사와 분석 대기열을 적재합니다.",
     },
 }
 
@@ -156,9 +156,9 @@ def _file_item(
 
 def _stock_snapshot(root_dir: Path) -> dict[str, object]:
     data_dir = root_dir / "data"
-    metrics_path = data_dir / "sp500_all_metrics_prices.csv"
-    market_cap_path = data_dir / "sp500_market_caps.csv"
-    sqlite_path = data_dir / "sp500_shared_db" / "sp500_shared_prices.sqlite"
+    metrics_path = data_dir / "krx_close_prices.csv"
+    market_cap_path = data_dir / "krx_market_caps.csv"
+    sqlite_path = data_dir / "krx_shared_db" / "krx_shared_prices.sqlite"
     sqlite_row = _sqlite_fetchone(sqlite_path, "SELECT MAX(date), COUNT(*) FROM prices")
     sqlite_max_date = str(sqlite_row[0]) if sqlite_row and sqlite_row[0] else None
     sqlite_rows = int(sqlite_row[1]) if sqlite_row and sqlite_row[1] is not None else None
@@ -172,7 +172,7 @@ def _stock_snapshot(root_dir: Path) -> dict[str, object]:
 
 
 def _quarterly_snapshot(root_dir: Path) -> dict[str, object]:
-    sqlite_path = root_dir / "data" / "sp500_shared_db" / "sp500_shared_prices.sqlite"
+    sqlite_path = root_dir / "data" / "krx_shared_db" / "krx_shared_prices.sqlite"
     row = _sqlite_fetchone(
         sqlite_path,
         "SELECT MAX(fiscal_date), COUNT(*), COUNT(DISTINCT symbol), MAX(updated_at) FROM fundamentals_quarterly",
@@ -193,20 +193,20 @@ def _quarterly_snapshot(root_dir: Path) -> dict[str, object]:
 
 
 def _news_snapshot(root_dir: Path) -> dict[str, object]:
-    sqlite_path = root_dir / "data" / "sp500_shared_db" / "sp500_shared_prices.sqlite"
-    row = _sqlite_fetchone(sqlite_path, "SELECT MAX(publish_date), COUNT(*), COUNT(DISTINCT ticker) FROM news_articles")
+    sqlite_path = root_dir / "data" / "krx_shared_db" / "krx_shared_prices.sqlite"
+    row = _sqlite_fetchone(sqlite_path, "SELECT MAX(publish_date), COUNT(*), COUNT(DISTINCT symbol) FROM news_articles")
     max_publish = str(row[0]) if row and row[0] else None
     total_rows = int(row[1]) if row and row[1] is not None else None
-    ticker_count = int(row[2]) if row and row[2] is not None else None
+    symbol_count = int(row[2]) if row and row[2] is not None else None
     item = _file_item(
         sqlite_path,
         root_dir=root_dir,
         label="Shared SQLite 뉴스 테이블",
         latest_value=max_publish,
         rows=total_rows,
-        detail=f"tickers={ticker_count or 0}, table=news_articles",
+        detail=f"symbols={symbol_count or 0}, table=news_articles",
     )
-    return {"summary": f"최신 publish_date {max_publish or '-'} / 기사 {total_rows or 0}건 / 티커 {ticker_count or 0}개", "items": [item]}
+    return {"summary": f"최신 publish_date {max_publish or '-'} / 기사 {total_rows or 0}건 / 티커 {symbol_count or 0}개", "items": [item]}
 
 
 def _snapshot(job_id: str) -> dict[str, object]:
@@ -353,7 +353,7 @@ def original_status_payload() -> dict[str, object]:
 
 def diagnostics_payload() -> dict[str, object]:
     root = settings.project_root
-    sqlite_path = root / "data" / "sp500_shared_db" / "sp500_shared_prices.sqlite"
+    sqlite_path = root / "data" / "krx_shared_db" / "krx_shared_prices.sqlite"
     info: dict[str, object] = {
         "project_root": str(root),
         "sqlite_path": str(sqlite_path),

@@ -20,7 +20,7 @@ if "%FRED_API_KEY%"=="" (
 
 echo.>>"%LOG_FILE%"
 echo ============================================================>>"%LOG_FILE%"
-echo [%date% %time%] Scheduled refresh started>>"%LOG_FILE%"
+echo [%date% %time%] Scheduled KRX refresh started>>"%LOG_FILE%"
 echo ============================================================>>"%LOG_FILE%"
 
 call ensure_lan_server.cmd >>"%LOG_FILE%" 2>&1
@@ -35,11 +35,11 @@ set "EXIT_CODE=%ERRORLEVEL%"
 if "%EXIT_CODE%"=="0" (
   echo.>>"%LOG_FILE%"
   echo ------------------------------------------------------------>>"%LOG_FILE%"
-  echo SQLite auto sync is disabled. Review the start page and push manually if needed.>>"%LOG_FILE%"
+  echo KRX SQLite auto sync is disabled. Review the start page and push manually if needed.>>"%LOG_FILE%"
   echo ------------------------------------------------------------>>"%LOG_FILE%"
 )
 
-echo [%date% %time%] Scheduled refresh finished with exit_code=%EXIT_CODE%>>"%LOG_FILE%"
+echo [%date% %time%] Scheduled KRX refresh finished with exit_code=%EXIT_CODE%>>"%LOG_FILE%"
 echo.>>"%LOG_FILE%"
 
 endlocal & exit /b %EXIT_CODE%

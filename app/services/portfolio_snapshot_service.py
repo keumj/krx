@@ -8,7 +8,7 @@ from typing import Any
 import pandas as pd
 
 from app.services import db_service
-from pipeline_portfolio.analysis import OptimizationResult, PortfolioDashboard, VirtualTradeResult
+from pipeline_krx_portfolio.analysis import OptimizationResult, PortfolioDashboard, VirtualTradeResult
 
 
 SNAPSHOT_TYPE_DASHBOARD = "dashboard"
