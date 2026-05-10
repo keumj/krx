@@ -17,7 +17,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 from pipeline_common.notebook_models import select_quarter_snapshots
 from pipeline_krx_stock.web_gui import _shared_theme_root_css
 
-from .analysis import MacroDashboard, build_macro_dashboard
+from .analysis import DEFAULT_LOOKBACK_DAYS, MacroDashboard, build_macro_dashboard
 
 
 YIELD_CURVE_SERIES_IDS = ["DGS1MO", "DGS3MO", "DGS6MO", "DGS1", "DGS2", "DGS3", "DGS5", "DGS7", "DGS10", "DGS20", "DGS30"]
@@ -27,10 +27,10 @@ YIELD_CURVE_LABELS = ["1M", "3M", "6M", "1Y", "2Y", "3Y", "5Y", "7Y", "10Y", "20
 
 PAGES: dict[str, tuple[str, str]] = {
     "overview": ("개요", "거시 국면, 핵심 점수, 주요 지표를 한 화면에서 봅니다."),
-    "regime": ("레짐", "성장, 원자재, 정책, 위험선호 축으로 현재 시장 환경을 분류합니다."),
+    "regime": ("레짐", "성장, 물가·비용, 정책, 위험선호 축으로 현재 시장 환경을 분류합니다."),
     "rates": ("금리/커브", "2년, 10년, 30년 금리와 장단기 스프레드를 점검합니다."),
-    "risk": ("위험자산", "KRX 수익률, 변동성, 낙폭을 기준으로 위험선호를 읽습니다."),
-    "dollar": ("달러/원자재", "달러와 원유, 금, 은, 구리 흐름을 함께 봅니다."),
+    "risk": ("위험자산", "KOSPI200 수익률, 변동성, 낙폭을 기준으로 위험선호를 읽습니다."),
+    "dollar": ("환율/국내지표", "원/달러 환율과 국내 비용·활동 지표를 함께 봅니다."),
     "playbook": ("섹터 플레이북", "현재 거시 환경에서 업종별 민감도와 선호도를 정리합니다."),
 }
 
@@ -83,6 +83,25 @@ def _normalize(frame: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _return_since_days(series: pd.Series, days: int = 60) -> float:
+    clean = pd.to_numeric(series, errors="coerce").dropna()
+    if len(clean) < 2:
+        return np.nan
+    if isinstance(clean.index, pd.DatetimeIndex):
+        latest_date = clean.index.max()
+        base_candidates = clean[clean.index <= latest_date - pd.Timedelta(days=int(days))]
+        if base_candidates.empty:
+            return np.nan
+        base = float(base_candidates.iloc[-1])
+    else:
+        window = min(int(days), len(clean) - 1)
+        base = float(clean.iloc[-(window + 1)])
+    latest = float(clean.iloc[-1])
+    if base == 0.0 or not np.isfinite(base):
+        return np.nan
+    return (latest / base - 1.0) * 100.0
+
+
 def _chart_to_base64(fig) -> str:
     buf = io.BytesIO()
     fig.tight_layout()
@@ -91,7 +110,7 @@ def _chart_to_base64(fig) -> str:
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
-def _line_chart(frame: pd.DataFrame, title: str, *, ylabel: str = "", normalize: bool = False, tail: int = 252) -> str:
+def _line_chart(frame: pd.DataFrame, title: str, *, ylabel: str = "", normalize: bool = False, tail: int = DEFAULT_LOOKBACK_DAYS) -> str:
     data = _normalize(frame) if normalize else frame.copy()
     data = data.tail(tail).apply(pd.to_numeric, errors="coerce").dropna(how="all")
     fig, ax = plt.subplots(figsize=(7.2, 3.3))
@@ -111,6 +130,27 @@ def _line_chart(frame: pd.DataFrame, title: str, *, ylabel: str = "", normalize:
     return _chart_to_base64(fig)
 
 
+def _multi_panel_line_chart(frame: pd.DataFrame, title: str, *, tail: int = DEFAULT_LOOKBACK_DAYS) -> str:
+    data = frame.tail(tail).apply(pd.to_numeric, errors="coerce").dropna(how="all")
+    columns = [col for col in data.columns if not data[col].dropna().empty]
+    nrows = max(len(columns), 1)
+    fig, axes = plt.subplots(nrows=nrows, ncols=1, figsize=(7.2, max(2.2, 1.75 * nrows)), sharex=False)
+    if nrows == 1:
+        axes = [axes]
+    if not columns:
+        axes[0].text(0.5, 0.5, "No data", ha="center", va="center")
+    else:
+        for ax, col in zip(axes, columns):
+            series = data[col].dropna()
+            ax.plot(series.index, series.values, linewidth=1.7, label=str(col))
+            ax.set_ylabel(str(col), fontsize=8)
+            ax.grid(True, alpha=0.22)
+            ax.tick_params(axis="x", labelrotation=18, labelsize=7)
+            ax.tick_params(axis="y", labelsize=7)
+    axes[0].set_title(title, fontsize=11, loc="left")
+    return _chart_to_base64(fig)
+
+
 def _dual_axis_line_chart(
     left_frame: pd.DataFrame,
     right_frame: pd.DataFrame,
@@ -120,12 +160,18 @@ def _dual_axis_line_chart(
     right_ylabel: str = "",
     normalize_left: bool = False,
     normalize_right: bool = False,
-    tail: int = 252,
+    tail: int = DEFAULT_LOOKBACK_DAYS,
 ) -> str:
     left = _normalize(left_frame) if normalize_left else left_frame.copy()
     right = _normalize(right_frame) if normalize_right else right_frame.copy()
     left = left.tail(tail).apply(pd.to_numeric, errors="coerce").dropna(how="all")
     right = right.tail(tail).apply(pd.to_numeric, errors="coerce").dropna(how="all")
+    if not left.empty and not right.empty:
+        start = max(left.dropna(how="all").index.min(), right.dropna(how="all").index.min())
+        end = min(left.dropna(how="all").index.max(), right.dropna(how="all").index.max())
+        if start <= end:
+            left = left[(left.index >= start) & (left.index <= end)]
+            right = right[(right.index >= start) & (right.index <= end)]
     fig, ax_left = plt.subplots(figsize=(7.2, 3.3))
     ax_right = ax_left.twinx()
     if left.empty and right.empty:
@@ -195,7 +241,7 @@ def _stacked_horizontal_bar_chart(frame: pd.DataFrame, label_col: str, value_col
     colors = ["#2563eb", "#d97706", "#7c3aed", "#0f766e"]
     legend_labels = {
         "성장 기여": "Growth",
-        "물가/원자재 기여": "Inflation",
+        "물가/비용 기여": "Inflation",
         "정책/금리 기여": "Policy/Rates",
         "위험선호 기여": "Risk Appetite",
     }
@@ -273,25 +319,54 @@ def _chart_card(title: str, image: str) -> str:
     return f'<section class="service-card macro-chart-card"><h2>{html.escape(title)}</h2><img src="data:image/png;base64,{image}" alt="{html.escape(title)} chart" /></section>'
 
 
+def _equity_column(dashboard: MacroDashboard) -> str:
+    for column in ("KOSPI200", "KRX"):
+        if column in dashboard.market_series.columns or column in dashboard.risk_series.columns:
+            return column
+    return str(dashboard.market_series.columns[0]) if len(dashboard.market_series.columns) else "KOSPI200"
+
+
 def _page_charts(page: str, dashboard: MacroDashboard) -> str:
+    equity_col = _equity_column(dashboard)
     if page == "overview":
-        comm = dashboard.commodity_series
-        overview_returns = {
-            "KRX": dashboard.market_series["KRX"],
-            "DXY": dashboard.market_series["DXY"],
-            "WTI": comm["WTI Crude"],
-            "Gold": comm["Gold"],
-            "Silver": comm["Silver"],
-            "Copper": comm["Copper"],
-        }
+        domestic = dashboard.commodity_series
+        fx_col = "USD/KRW" if "USD/KRW" in dashboard.market_series.columns else "DXY"
+        overview_returns = {equity_col: dashboard.market_series[equity_col], fx_col: dashboard.market_series[fx_col]}
+        if "Consumer Sentiment" in domestic.columns:
+            overview_returns["Consumer Sentiment"] = domestic["Consumer Sentiment"]
+        sentiment_frame = pd.DataFrame()
+        if "Consumer Sentiment" in domestic.columns:
+            monthly_equity = dashboard.market_series[equity_col].resample("MS").last().rename(equity_col)
+            sentiment_frame = pd.concat([monthly_equity, domestic["Consumer Sentiment"]], axis=1).dropna(how="all")
+        domestic_overview_cols = [col for col in ["CPI", "Consumer Sentiment", "Retail Sales"] if col in domestic.columns]
         charts = [
-            ("위험자산, 달러, 금 흐름", _line_chart(dashboard.market_series, "KRX / DXY / Gold Base 100", normalize=True)),
             (
-                "핵심 자산 60D 변화율",
+                "KOSPI200과 환율 흐름",
+                _dual_axis_line_chart(
+                    dashboard.market_series[[equity_col]],
+                    dashboard.market_series[[fx_col]],
+                    f"{equity_col} and {fx_col}",
+                    left_ylabel=equity_col,
+                    right_ylabel=fx_col,
+                ),
+            ),
+            (
+                "KOSPI200과 소비자심리",
+                _dual_axis_line_chart(
+                    sentiment_frame[[equity_col]],
+                    sentiment_frame[["Consumer Sentiment"]],
+                    f"{equity_col} and Consumer Sentiment",
+                    left_ylabel=equity_col,
+                    right_ylabel="Consumer Sentiment",
+                ) if {equity_col, "Consumer Sentiment"}.issubset(sentiment_frame.columns) else _line_chart(sentiment_frame, "Consumer Sentiment"),
+            ),
+            ("국내 핵심 지표", _multi_panel_line_chart(domestic[domestic_overview_cols], "Korea Core Indicators") if domestic_overview_cols else _line_chart(pd.DataFrame(), "Korea Core Indicators")),
+            (
+                "핵심 지표 최근 60일 변화율",
                 _horizontal_bar_chart(
                     list(overview_returns.keys()),
-                    [float((series.dropna().iloc[-1] / series.dropna().iloc[-61] - 1.0) * 100.0) if len(series.dropna()) > 60 else np.nan for series in overview_returns.values()],
-                    "Cross-asset 60D Returns",
+                    [_return_since_days(series, 60) for series in overview_returns.values()],
+                    "Key Indicator 60D Changes",
                     xlabel="%",
                 ),
             ),
@@ -301,55 +376,55 @@ def _page_charts(page: str, dashboard: MacroDashboard) -> str:
         charts = [
             ("레짐 시나리오 근접도", _horizontal_bar_chart(scenarios["시나리오"].astype(str).tolist(), scenarios["근접도"].astype(float).tolist(), "Regime Scenario Proximity", xlabel="score")),
             (
-                "KRX과 10Y-2Y 커브",
+                f"{equity_col}과 10Y-2Y 커브",
                 _dual_axis_line_chart(
-                    dashboard.market_series[["KRX"]],
+                    dashboard.market_series[[equity_col]],
                     dashboard.rate_series[["10Y-2Y"]],
                     "Equity Trend and Yield Curve",
-                    left_ylabel="KRX base 100",
+                    left_ylabel=equity_col,
                     right_ylabel="10Y-2Y %p",
-                    normalize_left=True,
                 ),
             ),
         ]
     elif page == "rates":
         charts = [
-            ("미국 국채 일드커브", _yield_curve_chart(dashboard.yield_curve_series, "Treasury Yield Curves (Quarter-end + Latest)")),
+            ("한국 금리 커브", _yield_curve_chart(dashboard.yield_curve_series, "Korea Rate Curves (Quarter-end + Latest)")),
             ("만기간 스프레드", _line_chart(dashboard.rate_series[["10Y-3M", "10Y-2Y", "5Y-2Y", "30Y-10Y"]], "Maturity Spreads", ylabel="%p")),
         ]
     elif page == "risk":
         risk = dashboard.risk_series
+        stress = dashboard.stress_series
         charts = [
             (
-                "KRX과 낙폭",
+                f"{equity_col}과 낙폭",
                 _dual_axis_line_chart(
-                    risk[["KRX"]],
+                    risk[[equity_col]],
                     risk[["Drawdown"]],
-                    "KRX and Drawdown",
-                    left_ylabel="KRX base 100",
+                    f"{equity_col} and Drawdown",
+                    left_ylabel=equity_col,
                     right_ylabel="drawdown %",
-                    normalize_left=True,
                 ),
             ),
             ("20D 연율 변동성", _line_chart(risk[["20D Ann Vol"]], "Rolling 20D Annualized Volatility", ylabel="annual %")),
-            ("옵션 스트레스: VIX", _line_chart(dashboard.stress_series[["VIX"]], "VIX", ylabel="index level")),
             (
-                "신용 스트레스: 회사채 스프레드",
+                "한국형 스트레스 지표",
                 _dual_axis_line_chart(
-                    dashboard.stress_series[["IG OAS", "Baa-AAA"]],
-                    dashboard.stress_series[["HY OAS"]],
-                    "Credit Spreads",
-                    left_ylabel="IG / Baa-AAA %p",
-                    right_ylabel="HY OAS %p",
-                ),
+                    stress[["USD/KRW 20D Ann Vol"]],
+                    stress[["10Y-2Y"]],
+                    "FX Volatility and Korea Curve",
+                    left_ylabel="USD/KRW vol, annual %",
+                    right_ylabel="10Y-2Y %p",
+                ) if {"USD/KRW 20D Ann Vol", "10Y-2Y"}.issubset(stress.columns) else _line_chart(stress, "FX Volatility and Korea Curve"),
             ),
         ]
     elif page == "dollar":
-        comm = dashboard.commodity_series
-        returns_60d = [float((comm[c].dropna().iloc[-1] / comm[c].dropna().iloc[-61] - 1.0) * 100.0) if len(comm[c].dropna()) > 60 else np.nan for c in comm.columns]
+        domestic = dashboard.commodity_series
+        fx_col = "USD/KRW" if "USD/KRW" in dashboard.market_series.columns else "DXY"
+        columns = [col for col in domestic.columns if col != fx_col]
+        returns_60d = [_return_since_days(domestic[c], 60) for c in columns]
         charts = [
-            ("달러와 원자재", _line_chart(pd.concat([dashboard.market_series[["DXY"]], comm], axis=1), "DXY and Commodities Base 100", normalize=True)),
-            ("원자재 60D 수익률", _bar_chart(comm.columns.astype(str).tolist(), returns_60d, "Commodity 60D Returns", ylabel="%")),
+            ("환율과 국내 비용/활동 지표", _multi_panel_line_chart(domestic[[fx_col, *columns]], f"{fx_col} and Korea Macro Levels")),
+            ("국내 비용/활동 60D 변화율", _bar_chart([str(c) for c in columns], returns_60d, "Korea Macro 60D Changes", ylabel="%")),
         ]
     else:
         playbook = dashboard.sector_playbook
@@ -361,7 +436,7 @@ def _page_charts(page: str, dashboard: MacroDashboard) -> str:
                 _stacked_horizontal_bar_chart(
                     attribution,
                     "섹터",
-                    ["성장 기여", "물가/원자재 기여", "정책/금리 기여", "위험선호 기여"],
+                    ["성장 기여", "물가/비용 기여", "정책/금리 기여", "위험선호 기여"],
                     "Sector Score Attribution",
                     xlabel="score",
                 ),
@@ -388,8 +463,8 @@ def _regime_page(dashboard: MacroDashboard) -> str:
     scores = dashboard.scores.set_index("점수")["값"]
     notes = pd.DataFrame(
         [
-            {"축": "성장", "읽는 법": "KRX 단기 모멘텀, 구리 흐름, 10Y-2Y 커브를 함께 봅니다. 주식과 구리가 강하고 커브가 덜 눌리면 실물 성장 기대가 살아 있다는 뜻이고, 셋이 엇갈리면 반등의 질을 낮게 봅니다.", "현재 점수": _fmt(scores.get("성장 모멘텀"))},
-            {"축": "물가/원자재", "읽는 법": "10년 금리, 달러, 원자재 바스켓을 묶어 비용 압력과 인플레 기대를 봅니다. 높을수록 기업 마진과 할인율에 부담이 생기므로 가격 전가력 있는 업종을 더 중시합니다.", "현재 점수": _fmt(scores.get("인플레/원자재 압력"))},
+            {"축": "성장", "읽는 법": "KOSPI200 단기 모멘텀, 소비자심리, 소매판매, 10Y-2Y 커브를 함께 봅니다. 주식과 수요 심리가 같이 좋아지고 커브가 덜 눌리면 국내 성장 기대가 살아 있다는 뜻입니다.", "현재 점수": _fmt(scores.get("성장 모멘텀"))},
+            {"축": "물가/비용", "읽는 법": "CPI, 원/달러 환율, 장기금리를 묶어 국내 비용 압력과 인플레 부담을 봅니다. 높을수록 기업 마진과 할인율에 부담이 생기므로 가격 전가력 있는 업종을 더 중시합니다.", "현재 점수": _fmt(scores.get("물가/비용 압력"))},
             {"축": "정책", "읽는 법": "2년 금리를 중심으로 시장이 예상하는 정책금리 부담을 읽습니다. 높은 점수는 금리 인하 기대가 약하거나 긴축 부담이 남아 있다는 뜻이라 장기 성장주 멀티플에는 불리합니다.", "현재 점수": _fmt(scores.get("정책 긴축도"))},
             {"축": "위험선호", "읽는 법": "수익률, 낙폭, 변동성을 조합해 시장이 위험을 받아들이는지 봅니다. 점수가 높으면 리스크 온, 낮으면 지수 베타보다 현금흐름과 방어력을 우선하는 구간으로 해석합니다.", "현재 점수": _fmt(scores.get("위험선호"))},
         ]
@@ -399,7 +474,7 @@ def _regime_page(dashboard: MacroDashboard) -> str:
     {_macro_nav("regime")}
     {_page_charts("regime", dashboard)}
     <section class="service-card"><h2>레짐 시나리오 근접도</h2>{_table(dashboard.regime_scenarios, table_class="macro-wide-table")}</section>
-    <section class="service-card"><h2>FRED 펀더멘털 체크</h2>{_table(dashboard.fred_macro, table_class="macro-wide-table")}</section>
+    <section class="service-card"><h2>한국 펀더멘털 체크</h2>{_table(dashboard.fred_macro, table_class="macro-wide-table")}</section>
     <section class="service-card"><h2>레짐 분해</h2>{_table(notes)}</section>
     <section class="service-card"><h2>점수 상세</h2>{_score_bars(dashboard.scores)}</section>
     """
@@ -421,7 +496,7 @@ def _risk_page(dashboard: MacroDashboard) -> str:
     {_hero(dashboard, PAGES["risk"][1])}
     {_macro_nav("risk")}
     {_page_charts("risk", dashboard)}
-    <section class="service-card"><h2>옵션·신용 스트레스</h2>{_table(dashboard.risk_stress, table_class="macro-wide-table")}</section>
+    <section class="service-card"><h2>한국형 시장 스트레스</h2>{_table(dashboard.risk_stress, table_class="macro-wide-table")}</section>
     <section class="service-card"><h2>시장 내부 폭</h2>{_table(dashboard.risk_breadth, table_class="macro-wide-table")}</section>
     <section class="service-card"><h2>위험자산 온도</h2>{_table(dashboard.risk_assets)}</section>
     """
@@ -432,8 +507,8 @@ def _dollar_page(dashboard: MacroDashboard) -> str:
     {_hero(dashboard, PAGES["dollar"][1])}
     {_macro_nav("dollar")}
     {_page_charts("dollar", dashboard)}
-    <section class="service-card"><h2>달러 민감도</h2>{_table(dashboard.dollar_sensitivity, table_class="macro-wide-table")}</section>
-    <section class="service-card"><h2>달러/원자재 압력</h2>{_table(dashboard.dollar_commodities)}</section>
+    <section class="service-card"><h2>환율 민감도</h2>{_table(dashboard.dollar_sensitivity, table_class="macro-wide-table")}</section>
+    <section class="service-card"><h2>국내 비용/활동 지표</h2>{_table(dashboard.dollar_commodities)}</section>
     """
 
 
@@ -448,7 +523,7 @@ def _playbook_page(dashboard: MacroDashboard) -> str:
     """
 
 
-def render_body(page: str, *, start_date: str | None = None, lookback_days: int = 504) -> str:
+def render_body(page: str, *, start_date: str | None = None, lookback_days: int = DEFAULT_LOOKBACK_DAYS) -> str:
     active = normalize_page(page)
     dashboard = build_macro_dashboard(start_date=start_date, lookback_days=lookback_days)
     page_html = {
@@ -508,7 +583,7 @@ def render_body(page: str, *, start_date: str | None = None, lookback_days: int 
     """
 
 
-def _html_page(page: str, *, start_date: str | None = None, lookback_days: int = 504) -> str:
+def _html_page(page: str, *, start_date: str | None = None, lookback_days: int = DEFAULT_LOOKBACK_DAYS) -> str:
     body = render_body(page, start_date=start_date, lookback_days=lookback_days)
     return f"""<!doctype html>
 <html lang="ko">
@@ -535,9 +610,9 @@ def launch_web_gui(host: str = "localhost", port: int = 8526, open_browser: bool
             query = parse_qs(parsed.query)
             start_date = str(query.get("start_date", [""])[0]).strip() or None
             try:
-                lookback_days = int(query.get("lookback_days", ["504"])[0] or "504")
+                lookback_days = int(query.get("lookback_days", [str(DEFAULT_LOOKBACK_DAYS)])[0] or str(DEFAULT_LOOKBACK_DAYS))
             except ValueError:
-                lookback_days = 504
+                lookback_days = DEFAULT_LOOKBACK_DAYS
             payload = _html_page(page, start_date=start_date, lookback_days=lookback_days).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")

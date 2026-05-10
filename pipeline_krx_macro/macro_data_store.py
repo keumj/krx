@@ -20,12 +20,19 @@ class MacroSeriesSpec:
     local_csv: str | None = None
     local_name: str | None = None
     yahoo_symbol: str | None = None
+    ecos_stat_code: str | None = None
+    ecos_cycle: str | None = None
+    ecos_item_code1: str | None = None
+    ecos_item_code2: str | None = None
+    ecos_item_code3: str | None = None
+    ecos_item_code4: str | None = None
 
 
-TREASURY_SERIES_IDS = ["DGS1MO", "DGS3MO", "DGS6MO", "DGS1", "DGS2", "DGS3", "DGS5", "DGS7", "DGS10", "DGS20", "DGS30"]
+TREASURY_SERIES_IDS = ["DGS2", "DGS10", "DGS30"]
 
 FRED_SPECS: list[MacroSeriesSpec] = [
     *[MacroSeriesSpec(series_id=sid, dataset="treasury", frequency="daily", fred_id=sid, local_csv="data/treasury_yields.csv") for sid in TREASURY_SERIES_IDS],
+    MacroSeriesSpec("SP500", "market", "daily", "SP500", local_csv="data/sp500_index.csv", yahoo_symbol="^GSPC"),
     MacroSeriesSpec("VIX", "risk", "daily", "VIXCLS"),
     MacroSeriesSpec("IG_OAS", "credit", "daily", "BAMLC0A0CM"),
     MacroSeriesSpec("HY_OAS", "credit", "daily", "BAMLH0A0HYM2"),
@@ -45,10 +52,145 @@ FRED_SPECS: list[MacroSeriesSpec] = [
 ]
 
 LOCAL_ONLY_SPECS: list[MacroSeriesSpec] = [
-    MacroSeriesSpec("DXY", "market", "daily", local_csv="data/dxy.csv", local_name="DXY", yahoo_symbol="DX-Y.NYB"),
+    MacroSeriesSpec("DXY", "market", "daily", "DTWEXBGS", local_csv="data/dxy.csv", local_name="DXY", yahoo_symbol="DX-Y.NYB"),
 ]
 
-ALL_SPECS = [*FRED_SPECS, *LOCAL_ONLY_SPECS]
+KOREA_MACRO_SPECS: list[MacroSeriesSpec] = [
+    MacroSeriesSpec(
+        "KOSPI200",
+        "korea_market",
+        "daily",
+        local_csv="data/kospi200.csv",
+        local_name="KOSPI200",
+        yahoo_symbol="^KS200",
+    ),
+    MacroSeriesSpec(
+        "KR_BASE_RATE",
+        "korea_rates",
+        "daily",
+        local_csv="data/korea_base_rate.csv",
+        ecos_stat_code="722Y001",
+        ecos_cycle="D",
+        ecos_item_code1="0101000",
+    ),
+    MacroSeriesSpec(
+        "KR_TBOND_3Y",
+        "korea_rates",
+        "daily",
+        local_csv="data/korea_tbond_3y.csv",
+        ecos_stat_code="817Y002",
+        ecos_cycle="D",
+        ecos_item_code1="010200000",
+    ),
+    MacroSeriesSpec(
+        "KR_TBOND_10Y",
+        "korea_rates",
+        "daily",
+        local_csv="data/korea_tbond_10y.csv",
+        ecos_stat_code="817Y002",
+        ecos_cycle="D",
+        ecos_item_code1="010210000",
+    ),
+    MacroSeriesSpec(
+        "KR_TBOND_30Y",
+        "korea_rates",
+        "daily",
+        local_csv="data/korea_tbond_30y.csv",
+        ecos_stat_code="817Y002",
+        ecos_cycle="D",
+        ecos_item_code1="010230000",
+    ),
+    MacroSeriesSpec(
+        "KR_USDKRW",
+        "korea_fx",
+        "daily",
+        local_csv="data/korea_usdkrw.csv",
+        ecos_stat_code="731Y001",
+        ecos_cycle="D",
+        ecos_item_code1="0000001",
+    ),
+    MacroSeriesSpec(
+        "KR_CPI",
+        "korea_macro",
+        "monthly",
+        local_csv="data/korea_cpi.csv",
+        ecos_stat_code="901Y009",
+        ecos_cycle="M",
+        ecos_item_code1="0",
+    ),
+    MacroSeriesSpec(
+        "KR_UNRATE",
+        "korea_macro",
+        "monthly",
+        local_csv="data/korea_unemployment_rate.csv",
+        ecos_stat_code="901Y027",
+        ecos_cycle="M",
+        ecos_item_code1="I61E",
+    ),
+    MacroSeriesSpec(
+        "KR_EMPLOYED",
+        "korea_macro",
+        "monthly",
+        local_csv="data/korea_employed.csv",
+        ecos_stat_code="901Y027",
+        ecos_cycle="M",
+        ecos_item_code1="I61BC",
+    ),
+    MacroSeriesSpec(
+        "KR_IPI",
+        "korea_macro",
+        "monthly",
+        local_csv="data/korea_industrial_production.csv",
+        ecos_stat_code="901Y032",
+        ecos_cycle="M",
+        ecos_item_code1="I11AC",
+    ),
+    MacroSeriesSpec(
+        "KR_RETAIL",
+        "korea_macro",
+        "monthly",
+        local_csv="data/korea_retail_sales.csv",
+        ecos_stat_code="901Y038",
+        ecos_cycle="M",
+        ecos_item_code1="I51A",
+    ),
+    MacroSeriesSpec(
+        "KR_CCSI",
+        "korea_macro",
+        "monthly",
+        local_csv="data/korea_consumer_sentiment.csv",
+        ecos_stat_code="511Y002",
+        ecos_cycle="M",
+        ecos_item_code1="FME",
+    ),
+    MacroSeriesSpec(
+        "KR_M2",
+        "korea_macro",
+        "monthly",
+        local_csv="data/korea_m2.csv",
+        ecos_stat_code="161Y006",
+        ecos_cycle="M",
+        ecos_item_code1="BBHA00",
+    ),
+    MacroSeriesSpec(
+        "KR_GDP",
+        "korea_macro",
+        "quarterly",
+        local_csv="data/korea_real_gdp.csv",
+        ecos_stat_code="200Y104",
+        ecos_cycle="Q",
+        ecos_item_code1="1400",
+    ),
+]
+
+GLOBAL_COMPARISON_SPECS: list[MacroSeriesSpec] = [
+    *[spec for spec in FRED_SPECS if spec.series_id in {"DGS2", "DGS10", "DGS30", "SP500"}],
+    *LOCAL_ONLY_SPECS,
+]
+
+DAILY_MACRO_SPECS = [*KOREA_MACRO_SPECS, *GLOBAL_COMPARISON_SPECS]
+
+ALL_SPECS = [*KOREA_MACRO_SPECS, *FRED_SPECS, *LOCAL_ONLY_SPECS]
 
 
 def macro_db_path(path: str | os.PathLike[str] | None = None) -> Path:

@@ -15,6 +15,9 @@ if exist ".venv\Scripts\python.exe" (
 if "%FRED_API_KEY%"=="" (
   for /f "tokens=2,*" %%A in ('reg query HKCU\Environment /v FRED_API_KEY 2^>nul') do set "FRED_API_KEY=%%B"
 )
+if "%KOREA_ECOS_API_KEY%"=="" (
+  for /f "tokens=2,*" %%A in ('reg query HKCU\Environment /v KOREA_ECOS_API_KEY 2^>nul') do set "KOREA_ECOS_API_KEY=%%B"
+)
 
 echo.
 echo ============================================================
@@ -85,7 +88,7 @@ call :show_latest news
 goto :status
 
 :macro
-call :run_module pipeline_krx_macro.refresh_macro_prices
+call :run_module_args pipeline_krx_macro.refresh_macro_prices --years 10 --daily-core --require-ecos
 if errorlevel 1 (
   set "EXIT_CODE=%ERRORLEVEL%"
   goto :status
@@ -113,7 +116,7 @@ if errorlevel 1 (
   goto :status
 )
 call :show_latest news
-call :run_module pipeline_krx_macro.refresh_macro_prices
+call :run_module_args pipeline_krx_macro.refresh_macro_prices --years 10 --daily-core --require-ecos
 if errorlevel 1 (
   set "EXIT_CODE=%ERRORLEVEL%"
   goto :status
@@ -128,6 +131,14 @@ echo ------------------------------------------------------------
 echo Running: %~1
 echo ------------------------------------------------------------
 "%PYTHON_EXE%" -u -m %~1
+exit /b %ERRORLEVEL%
+
+:run_module_args
+echo.
+echo ------------------------------------------------------------
+echo Running: %*
+echo ------------------------------------------------------------
+"%PYTHON_EXE%" -u -m %*
 exit /b %ERRORLEVEL%
 
 :show_latest

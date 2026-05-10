@@ -13,6 +13,7 @@ from pipeline_common.notebook_data import (
     load_krx_components,
     make_gbm_series,
 )
+from pipeline_krx.db import load_latest_krx_benchmark_snapshot
 
 from .macro_data_store import read_macro_frame, read_macro_series
 
@@ -22,8 +23,8 @@ except Exception:  # pragma: no cover - optional dependency
     Fred = None
 
 
-DEFAULT_START_DATE = "2024-01-01"
-DEFAULT_LOOKBACK_DAYS = 504
+DEFAULT_START_DATE = "2006-01-01"
+DEFAULT_LOOKBACK_DAYS = 5200
 
 
 @dataclass
@@ -70,6 +71,33 @@ def _return_pct(series: pd.Series, window: int) -> float:
     if base == 0 or not np.isfinite(base):
         return np.nan
     return (latest / base - 1.0) * 100.0
+
+
+def _return_since_days(series: pd.Series, days: int) -> float:
+    clean = pd.to_numeric(series, errors="coerce").dropna()
+    if len(clean) < 2:
+        return np.nan
+    if isinstance(clean.index, pd.DatetimeIndex):
+        latest_date = clean.index.max()
+        base_candidates = clean[clean.index <= latest_date - pd.Timedelta(days=int(days))]
+        if base_candidates.empty:
+            return np.nan
+        base = float(base_candidates.iloc[-1])
+    else:
+        window = min(int(days), len(clean) - 1)
+        base = float(clean.iloc[-(window + 1)])
+    latest = float(clean.iloc[-1])
+    if base == 0.0 or not np.isfinite(base):
+        return np.nan
+    return (latest / base - 1.0) * 100.0
+
+
+def _annualized_recent_vol(series: pd.Series, periods: int = 12) -> float:
+    clean = pd.to_numeric(series, errors="coerce").dropna()
+    returns = clean.pct_change(fill_method=None).dropna().tail(int(periods))
+    if len(returns) < 3:
+        return np.nan
+    return float(returns.std(ddof=1) * np.sqrt(12.0) * 100.0)
 
 
 def _return_pct_periods(series: pd.Series, periods: int) -> float:
@@ -212,15 +240,43 @@ def _percentile_rank(series: pd.Series, window: int = 504) -> float:
     return float((clean <= latest).mean() * 100.0)
 
 
-def _cap_weighted_series(prices: pd.DataFrame, symbols: list[str]) -> pd.Series:
+def _load_kospi200_components(max_symbols: int = 200) -> tuple[pd.DataFrame, str]:
+    benchmark = load_latest_krx_benchmark_snapshot("KOSPI200")
+    if benchmark is not None and not benchmark.empty and "symbol" in benchmark.columns:
+        out = benchmark.copy()
+        out["Symbol"] = out["symbol"].astype(str).str.strip().str.upper()
+        out["Sector"] = out.get("sector", "Unknown")
+        if "benchmark_weight" in out.columns:
+            out["benchmark_weight"] = pd.to_numeric(out["benchmark_weight"], errors="coerce")
+        return out.head(max_symbols).reset_index(drop=True), "sqlite:benchmark_constituents:KOSPI200"
+
+    components, source = load_krx_components(max_symbols=max_symbols)
+    return components, f"{source}:fallback_for_KOSPI200"
+
+
+def _cap_weighted_series(
+    prices: pd.DataFrame,
+    symbols: list[str],
+    *,
+    weights: pd.Series | None = None,
+    name: str = "KOSPI200",
+) -> pd.Series:
     frame = prices.reindex(columns=symbols).apply(pd.to_numeric, errors="coerce").dropna(how="all")
     if frame.empty:
-        return pd.Series(dtype=float, name="KRX")
+        return pd.Series(dtype=float, name=name)
     daily = frame.pct_change(fill_method=None)
-    market_daily = daily.mean(axis=1, skipna=True).dropna()
+    if weights is not None and not weights.empty:
+        aligned = pd.to_numeric(weights.reindex(frame.columns), errors="coerce").fillna(0.0)
+        if float(aligned.sum()) > 0.0:
+            valid_weight = daily.notna().mul(aligned, axis=1).sum(axis=1).replace(0.0, np.nan)
+            market_daily = daily.mul(aligned, axis=1).sum(axis=1, min_count=1).div(valid_weight).dropna()
+        else:
+            market_daily = daily.mean(axis=1, skipna=True).dropna()
+    else:
+        market_daily = daily.mean(axis=1, skipna=True).dropna()
     if market_daily.empty:
-        return pd.Series(dtype=float, name="KRX")
-    return (1.0 + market_daily).cumprod().rename("KRX")
+        return pd.Series(dtype=float, name=name)
+    return (1.0 + market_daily).cumprod().rename(name)
 
 
 def _read_local_series(path: Path, name: str, start: str) -> pd.Series | None:
@@ -354,6 +410,59 @@ def _load_fred_or_local_series(
     )
 
 
+def _load_preferred_macro_series(
+    name: str,
+    *,
+    sqlite_ids: list[str],
+    env_name: str,
+    filenames: list[str],
+    start: str,
+    fallback_base: float,
+    fallback_mean: float,
+    fallback_speed: float,
+    fallback_vol: float,
+    seed: int,
+    fred_id: str | None = None,
+) -> tuple[pd.Series, str]:
+    for sqlite_id in sqlite_ids:
+        sqlite_series, sqlite_source = read_macro_series(sqlite_id, start_date=start)
+        if sqlite_series is not None and not sqlite_series.empty:
+            sqlite_series.name = name
+            source = sqlite_source or "macro_sqlite"
+            return sqlite_series, f"{source}:{sqlite_id}"
+    candidates = [os.getenv(env_name, "").strip(), *filenames]
+    for raw_path in candidates:
+        if not raw_path:
+            continue
+        series = _read_local_series(Path(raw_path), name, start)
+        if series is not None:
+            return series.rename(name), f"local_csv:{raw_path}"
+    if fred_id and Fred is not None:
+        try:
+            fred = Fred(api_key=os.getenv("FRED_API_KEY"))
+            raw = fred.get_series(fred_id, observation_start=start)
+            series = pd.Series(raw).dropna().astype(float)
+            series.index = pd.to_datetime(series.index).normalize()
+            series = series[~series.index.duplicated(keep="last")]
+            series = series[series.index >= pd.Timestamp(start)].rename(name)
+            if not series.empty:
+                return series, f"fred:{fred_id}"
+        except Exception:
+            pass
+    return (
+        _make_mean_reverting_series(
+            name,
+            start=start,
+            base=fallback_base,
+            mean=fallback_mean,
+            speed=fallback_speed,
+            vol=fallback_vol,
+            seed=seed,
+        ),
+        "fallback",
+    )
+
+
 def _simple_regime(growth: float, inflation: float, policy: float, risk: float) -> tuple[str, str, str]:
     if risk < 35 and growth < 45:
         return "Risk-off Slowdown", "High", "Defensive"
@@ -368,15 +477,16 @@ def _simple_regime(growth: float, inflation: float, policy: float, risk: float) 
     return "Mixed Macro", "Medium", "Neutral"
 
 
-def _sector_bias_table(growth: float, inflation: float, policy: float, risk: float) -> pd.DataFrame:
+def _sector_bias_table(growth: float, inflation: float, policy: float, risk: float, liquidity: float) -> pd.DataFrame:
     rows = [
-        ("Information Technology", "성장/유동성 민감", 0.35 * growth + 0.35 * risk + 0.30 * (100 - policy), "이익의 현재보다 미래 성장 기대가 더 중요해 금리와 유동성 변화에 민감합니다. 성장과 위험선호가 높고 정책 긴축도가 낮을수록 선호 점수가 올라갑니다."),
-        ("Financials", "커브 정상화와 경기 기대 민감", 0.45 * growth + 0.30 * policy + 0.25 * risk, "은행과 금융주는 경기 회복, 대출 수요, 순이자마진의 영향을 함께 받습니다. 커브가 정상화되고 경기 기대가 살아날수록 긍정적으로 봅니다."),
-        ("Energy", "원유와 인플레 압력 민감", 0.45 * inflation + 0.25 * growth + 0.30 * risk, "유가와 원자재 가격이 매출·마진에 직접 연결됩니다. 인플레 압력이 높고 위험선호가 유지될 때 방어 겸 경기민감 성격이 강해집니다."),
-        ("Materials", "구리/글로벌 제조 사이클 민감", 0.45 * growth + 0.35 * inflation + 0.20 * risk, "소재는 제조업, 인프라, 중국 수요, 원자재 가격의 교차점에 있습니다. 성장 모멘텀과 구리 가격이 함께 좋아질 때 신뢰도가 높습니다."),
-        ("Health Care", "방어 성장", 0.25 * growth + 0.25 * risk + 0.50 * (100 - policy), "경기 둔화에도 이익 방어력이 비교적 높고, 금리 부담이 내려갈 때 성장 프리미엄도 회복될 수 있습니다."),
-        ("Consumer Staples", "방어/저변동", 0.20 * growth + 0.20 * risk + 0.60 * (100 - inflation), "필수소비는 수요 안정성이 강하지만 원가 인플레가 높으면 마진이 눌릴 수 있습니다. 물가 압력이 낮아질수록 방어 매력이 선명해집니다."),
-        ("Utilities / REITs", "금리 하락 수혜", 0.20 * growth + 0.20 * risk + 0.60 * (100 - policy), "배당과 장기 현금흐름 성격이 강해 금리 상승에는 취약합니다. 정책 부담과 장기금리가 내려갈 때 상대 매력이 높아집니다."),
+        ("반도체/IT", "수출·유동성·위험선호 민감", 0.30 * growth + 0.30 * risk + 0.25 * liquidity + 0.15 * (100 - policy), "국내 증시 비중이 큰 성장/수출 축입니다. 소비자심리와 KOSPI200 모멘텀이 좋고 환율·금리가 안정될수록 점수가 올라갑니다."),
+        ("자동차/수출제조", "원화·글로벌 수요·제조 사이클 민감", 0.40 * growth + 0.25 * risk + 0.20 * liquidity + 0.15 * (100 - inflation), "산업생산과 수출 경기, 원화 방향의 영향을 함께 받습니다. 성장 점수가 살아나고 비용 압력이 낮을 때 우호적으로 봅니다."),
+        ("금융", "커브·금리 레벨·경기 민감", 0.35 * growth + 0.30 * policy + 0.20 * risk + 0.15 * liquidity, "은행과 보험은 금리 레벨과 경기 신용 흐름에 민감합니다. 커브가 정상화되고 위험선호가 버틸 때 상대 매력이 좋아집니다."),
+        ("화학/소재", "제조업·비용 압력 민감", 0.45 * growth + 0.20 * risk + 0.20 * (100 - inflation) + 0.15 * liquidity, "원자재 가격 자체보다 국내 산업생산, 수입 원가, 환율 부담을 함께 봅니다. 비용 압력이 낮아질수록 마진 회복 여지가 커집니다."),
+        ("경기소비/유통", "소매판매·고용·금리 민감", 0.35 * growth + 0.25 * risk + 0.25 * (100 - policy) + 0.15 * (100 - inflation), "소매판매와 고용이 개선되고 금리 부담이 낮아질 때 우호적입니다. 물가가 높으면 실질 구매력이 눌릴 수 있습니다."),
+        ("필수소비/음식료", "방어·원가 안정 민감", 0.15 * growth + 0.20 * risk + 0.45 * (100 - inflation) + 0.20 * (100 - policy), "수요 방어력은 높지만 원가와 환율 부담에 취약합니다. 물가 압력이 낮아질수록 방어 매력이 선명해집니다."),
+        ("바이오/헬스케어", "금리 하락·위험선호 민감", 0.20 * growth + 0.30 * risk + 0.35 * (100 - policy) + 0.15 * liquidity, "장기 성장 기대가 커 금리와 유동성에 민감합니다. 정책 부담이 낮아지고 시장 위험선호가 살아날 때 점수가 올라갑니다."),
+        ("통신/유틸/배당", "방어·금리 민감", 0.10 * growth + 0.20 * risk + 0.50 * (100 - policy) + 0.20 * (100 - inflation), "방어적 현금흐름과 배당 성격이 강합니다. 금리와 물가 부담이 내려갈 때 상대 매력이 개선됩니다."),
     ]
     out = pd.DataFrame(rows, columns=["섹터", "민감도", "선호 점수", "읽는 법"])
     out["선호 점수"] = out["선호 점수"].astype(float).clip(0.0, 100.0)
@@ -397,30 +507,31 @@ def _macro_pulse_table(
     dgs2: pd.Series,
     dgs10: pd.Series,
     dxy: pd.Series,
-    commodity_basket: pd.Series,
+    dxy_label: str,
+    domestic_basket: pd.Series,
 ) -> pd.DataFrame:
     growth = scores_map.get("성장 모멘텀", np.nan)
-    inflation = scores_map.get("인플레/원자재 압력", np.nan)
+    inflation = scores_map.get("물가/비용 압력", np.nan)
     policy = scores_map.get("정책 긴축도", np.nan)
     risk = scores_map.get("위험선호", np.nan)
     recession = scores_map.get("침체 리스크", np.nan)
     liquidity = scores_map.get("유동성", np.nan)
-    commodity_60d = _return_pct((1.0 + commodity_basket).cumprod(), 60)
+    domestic_60d = _return_since_days((1.0 + domestic_basket).cumprod(), 60)
     curve_bp = _latest_value(curve_10y_2y) * 100.0
     rows = [
         {
             "축": "성장 모멘텀",
             "점수": growth,
             "상태": _score_state(growth, high="확장 우위", low="둔화 우위"),
-            "핵심 판독": f"KRX 20D {_fmt_signed(risk_return_20d, '%')}, 10Y-2Y {_fmt_bp(curve_bp)}",
-            "포트폴리오 의미": "주가 모멘텀, 구리, 장단기 커브가 동시에 개선되는지 보는 축입니다. 높으면 경기민감주와 퀄리티 성장주를 함께 검토하고, 낮으면 이익 안정성과 방어력을 우선합니다.",
+            "핵심 판독": f"KOSPI200 20D {_fmt_signed(risk_return_20d, '%')}, 10Y-2Y {_fmt_bp(curve_bp)}",
+            "포트폴리오 의미": "KOSPI200 모멘텀, 소비심리·소매판매 흐름, 장단기 커브가 동시에 개선되는지 보는 축입니다. 높으면 국내 경기민감주와 퀄리티 성장주를 함께 검토합니다.",
         },
         {
-            "축": "인플레/원자재 압력",
+            "축": "물가/비용 압력",
             "점수": inflation,
             "상태": _score_state(inflation, high="비용 압력 높음", low="디스인플레 우위"),
-            "핵심 판독": f"원자재 바스켓 60D {_fmt_signed(commodity_60d, '%')}, 10Y {_fmt_level(_latest_value(dgs10))}",
-            "포트폴리오 의미": "원자재와 금리, 달러가 함께 만드는 비용 압력입니다. 높으면 기업 마진이 눌릴 수 있어 가격 전가력, 에너지·소재 노출, 원가 민감도를 먼저 확인합니다.",
+            "핵심 판독": f"국내 비용 바스켓 60D {_fmt_signed(domestic_60d, '%')}, 10Y {_fmt_level(_latest_value(dgs10))}",
+            "포트폴리오 의미": "CPI, 원/달러 환율, 장기금리가 만드는 국내 비용 압력입니다. 높으면 기업 마진이 눌릴 수 있어 가격 전가력과 원가 민감도를 먼저 확인합니다.",
         },
         {
             "축": "정책 긴축도",
@@ -447,8 +558,8 @@ def _macro_pulse_table(
             "축": "유동성",
             "점수": liquidity,
             "상태": _score_state(liquidity, high="유동성 우호", low="유동성 부담"),
-            "핵심 판독": f"DXY 60D {_fmt_signed(_return_pct(dxy, 60), '%')}, 10Y 60D {_fmt_bp(_change_bp(dgs10, 60))}",
-            "포트폴리오 의미": "달러와 장기금리가 낮아질수록 글로벌 유동성 여건은 부드러워집니다. 높으면 성장주와 해외 위험자산에 우호적이고, 낮으면 달러 강세 피해와 할인율 부담을 경계합니다.",
+            "핵심 판독": f"{dxy_label} 60D {_fmt_signed(_return_pct(dxy, 60), '%')}, 10Y 60D {_fmt_bp(_change_bp(dgs10, 60))}",
+            "포트폴리오 의미": "환율·달러 지표와 장기금리가 안정될수록 국내 위험자산 여건은 부드러워집니다. 높으면 KOSPI200 위험선호에 우호적이고, 낮으면 환율·할인율 부담을 경계합니다.",
         },
     ]
     return pd.DataFrame(rows)
@@ -596,7 +707,7 @@ def _risk_breadth_table(prices: pd.DataFrame, spx: pd.Series) -> pd.DataFrame:
         {
             "진단": "하락일 동반 하락률",
             "현재": downside_participation,
-            "해석": "KRX proxy가 하락한 날에 같이 하락한 종목 비율입니다. 높으면 매도 압력이 시장 전반으로 퍼진다는 뜻이라 손실 확대와 상관관계 상승에 대비합니다.",
+            "해석": "KOSPI200 proxy가 하락한 날에 같이 하락한 종목 비율입니다. 높으면 매도 압력이 시장 전반으로 퍼진다는 뜻이라 손실 확대와 상관관계 상승에 대비합니다.",
         },
     ]
     return pd.DataFrame(rows)
@@ -618,14 +729,72 @@ def _stress_state(name: str, level: float, change_20d: float, percentile: float)
     return "안정"
 
 
-def _risk_stress_table(vix: pd.Series, ig_oas: pd.Series, hy_oas: pd.Series, baa_aaa: pd.Series) -> pd.DataFrame:
+def _risk_stress_table(
+    vix: pd.Series,
+    ig_oas: pd.Series,
+    hy_oas: pd.Series,
+    baa_aaa: pd.Series,
+    *,
+    krx_vol: pd.Series | None = None,
+    krx_drawdown: pd.Series | None = None,
+    fx_vol: pd.Series | None = None,
+    curve_10y_2y: pd.Series | None = None,
+) -> pd.DataFrame:
+    if krx_vol is not None or krx_drawdown is not None or fx_vol is not None or curve_10y_2y is not None:
+        rows = []
+        specs = [
+            (
+                "KOSPI200 20D 실현변동성",
+                krx_vol if krx_vol is not None else pd.Series(dtype=float),
+                "연 %",
+                "KOSPI200 자체 가격 변동성입니다. 높아지면 같은 주식 비중에서도 손익 흔들림이 커지므로 포지션 크기와 손실 한도를 낮춰 봅니다.",
+            ),
+            (
+                "KOSPI200 낙폭",
+                krx_drawdown if krx_drawdown is not None else pd.Series(dtype=float),
+                "%",
+                "최근 고점 대비 하락률입니다. 낙폭이 깊고 회복 폭이 좁으면 시장 내부 스트레스가 아직 남아 있다고 봅니다.",
+            ),
+            (
+                "USD/KRW 20D 변동성",
+                fx_vol if fx_vol is not None else pd.Series(dtype=float),
+                "연 %",
+                "원/달러 환율 변동성입니다. 확대되면 외국인 수급과 수입 원가, 헤지 비용 부담이 커질 수 있습니다.",
+            ),
+            (
+                "국고채 10Y-2Y",
+                curve_10y_2y if curve_10y_2y is not None else pd.Series(dtype=float),
+                "%p",
+                "국내 장단기 금리차입니다. 낮거나 역전되면 단기 정책 부담이 장기 성장 기대를 누르는 환경으로 해석합니다.",
+            ),
+        ]
+        for name, series, unit, note in specs:
+            level = _latest_value(series)
+            change_20d = _change(series, 20)
+            change_60d = _change(series, 60)
+            pct = _percentile_rank(series)
+            stress_level = level if name != "KOSPI200 낙폭" else abs(level)
+            rows.append(
+                {
+                    "지표": name,
+                    "현재": level,
+                    "단위": unit,
+                    "20D 변화": change_20d,
+                    "60D 변화": change_60d,
+                    "백분위": pct,
+                    "상태": "스트레스 확대" if np.isfinite(pct) and pct >= 80.0 or np.isfinite(stress_level) and stress_level >= 25.0 else "안정" if np.isfinite(pct) and pct <= 50.0 else "경계",
+                    "해석": note,
+                }
+            )
+        return pd.DataFrame(rows)
+
     rows = []
     specs = [
         (
             "VIX",
             vix,
             "포인트",
-            "KRX 옵션시장이 반영하는 향후 30일 기대 변동성입니다. 상승하면 투자자들이 하락 방어 비용을 더 지불한다는 뜻이라, 주가가 버티더라도 포지션 크기와 손실 한도를 보수적으로 둡니다.",
+            "옵션시장이 반영하는 향후 30일 기대 변동성입니다. 상승하면 투자자들이 하락 방어 비용을 더 지불한다는 뜻이라, 주가가 버티더라도 포지션 크기와 손실 한도를 보수적으로 둡니다.",
         ),
         (
             "투자등급 회사채 OAS",
@@ -807,31 +976,152 @@ def _fred_macro_table(
     return pd.DataFrame(rows)
 
 
-def _dollar_sensitivity_table(dxy: pd.Series, commodity_series: pd.DataFrame, spx: pd.Series) -> pd.DataFrame:
-    dxy_ret = dxy.pct_change(fill_method=None).dropna().rename("DXY")
-    assets = pd.concat([spx.rename("KRX"), commodity_series], axis=1)
+def _korea_macro_table(
+    *,
+    unrate: pd.Series,
+    payrolls: pd.Series,
+    cpi: pd.Series,
+    core_pce: pd.Series,
+    indpro: pd.Series,
+    retail_sales: pd.Series,
+    housing_starts: pd.Series,
+    consumer_sentiment: pd.Series,
+    m2: pd.Series,
+    fedfunds: pd.Series,
+    real_gdp: pd.Series,
+) -> pd.DataFrame:
+    employed_3m = pd.to_numeric(payrolls, errors="coerce").dropna().diff().tail(3).mean()
+    unrate_3m = _change_periods(unrate, 3)
+    cpi_yoy = _return_pct_periods(cpi, 12)
+    core_cpi_yoy = _return_pct_periods(core_pce, 12)
+    indpro_yoy = _return_pct_periods(indpro, 12)
+    retail_yoy = _return_pct_periods(retail_sales, 12)
+    m2_yoy = _return_pct_periods(m2, 12)
+    policy_6m = _change_periods(fedfunds, 6)
+    gdp_yoy = _return_pct_periods(real_gdp, 4)
+    sentiment_level = _latest_value(consumer_sentiment)
+    sentiment_pct = _percentile_rank(consumer_sentiment)
+
+    rows = [
+        {
+            "영역": "고용",
+            "지표": "한국 실업률",
+            "현재": _latest_value(unrate),
+            "모멘텀": unrate_3m,
+            "상태": "고용 둔화 경계" if np.isfinite(unrate_3m) and unrate_3m >= 0.3 else "고용 안정" if np.isfinite(unrate_3m) and unrate_3m <= 0.1 else "완만한 둔화",
+            "최근 관측일": _latest_date(unrate),
+            "해석": "한국 노동시장의 둔화 여부를 확인합니다. 실업률 상승 속도가 빨라지면 내수와 기업 이익 전망을 더 보수적으로 봅니다.",
+        },
+        {
+            "영역": "고용",
+            "지표": "취업자 수",
+            "현재": _latest_value(payrolls),
+            "모멘텀": employed_3m,
+            "상태": _macro_status(employed_3m, high=50.0, low=0.0, high_label="고용 증가 견조", mid_label="고용 둔화", low_label="고용 약화"),
+            "최근 관측일": _latest_date(payrolls),
+            "해석": "최근 3개월 평균 취업자 수 증감입니다. 증가세가 둔화되면 소비와 서비스 업종의 매출 민감도를 점검합니다.",
+        },
+        {
+            "영역": "물가",
+            "지표": "한국 CPI YoY",
+            "현재": cpi_yoy,
+            "모멘텀": _change_periods(cpi.pct_change(12, fill_method=None) * 100.0, 3),
+            "상태": _macro_status(cpi_yoy, high=3.0, low=2.0, high_label="물가 부담", mid_label="완만한 둔화", low_label="목표권 근접"),
+            "최근 관측일": _latest_date(cpi),
+            "해석": "한국 소비자물가의 전년 대비 흐름입니다. 높으면 한국은행 완화 기대가 늦어지고, 낮아지면 내수와 금리 민감 업종에 우호적입니다.",
+        },
+        {
+            "영역": "물가",
+            "지표": "근원/대체 CPI YoY",
+            "현재": core_cpi_yoy,
+            "모멘텀": _change_periods(core_pce.pct_change(12, fill_method=None) * 100.0, 3),
+            "상태": _macro_status(core_cpi_yoy, high=3.0, low=2.0, high_label="근원물가 부담", mid_label="완만한 둔화", low_label="목표권 근접"),
+            "최근 관측일": _latest_date(core_pce),
+            "해석": "한국 근원물가 시리즈가 있으면 근원 흐름을, 없으면 CPI 대체값을 사용합니다. 끈적하면 금리 인하 기대를 낮춰 봅니다.",
+        },
+        {
+            "영역": "생산",
+            "지표": "한국 산업생산 YoY",
+            "현재": indpro_yoy,
+            "모멘텀": _change_periods(indpro.pct_change(12, fill_method=None) * 100.0, 3),
+            "상태": _macro_status(indpro_yoy, high=2.0, low=-1.0, high_label="생산 확장", mid_label="정체", low_label="생산 둔화"),
+            "최근 관측일": _latest_date(indpro),
+            "해석": "제조업과 산업 활동의 실물 모멘텀입니다. 약해지면 반도체·소재·산업재의 경기 민감 이익 추정에 부담입니다.",
+        },
+        {
+            "영역": "소비",
+            "지표": "한국 소매판매 YoY",
+            "현재": retail_yoy,
+            "모멘텀": _change_periods(retail_sales.pct_change(12, fill_method=None) * 100.0, 3),
+            "상태": _macro_status(retail_yoy, high=3.0, low=0.0, high_label="소비 견조", mid_label="소비 둔화", low_label="소비 약화"),
+            "최근 관측일": _latest_date(retail_sales),
+            "해석": "내수 소비 흐름입니다. 둔화가 뚜렷하면 유통·음식료·여행·소비재 종목의 매출 민감도를 점검합니다.",
+        },
+        {
+            "영역": "심리",
+            "지표": "소비/내수 심리 대체",
+            "현재": sentiment_level,
+            "모멘텀": _change_periods(consumer_sentiment, 3),
+            "상태": "심리 개선" if np.isfinite(sentiment_pct) and sentiment_pct >= 60.0 else "심리 약화" if np.isfinite(sentiment_pct) and sentiment_pct <= 35.0 else "중립",
+            "최근 관측일": _latest_date(consumer_sentiment),
+            "해석": "소비심리 시리즈가 있으면 심리 지표를, 없으면 소매판매 대체값을 사용합니다. 내수주의 방향성을 보조적으로 확인합니다.",
+        },
+        {
+            "영역": "유동성",
+            "지표": "한국 M2 YoY",
+            "현재": m2_yoy,
+            "모멘텀": _change_periods(m2.pct_change(12, fill_method=None) * 100.0, 3),
+            "상태": _macro_status(m2_yoy, high=5.0, low=2.0, high_label="유동성 확장", mid_label="낮은 유동성", low_label="유동성 위축"),
+            "최근 관측일": _latest_date(m2),
+            "해석": "한국 광의통화 증가율입니다. 유동성이 확장되면 위험자산에 우호적일 수 있고, 위축되면 신용과 내수 민감 업종을 보수적으로 봅니다.",
+        },
+        {
+            "영역": "정책",
+            "지표": "한국 기준금리",
+            "현재": _latest_value(fedfunds),
+            "모멘텀": policy_6m * 100.0 if np.isfinite(policy_6m) else np.nan,
+            "상태": "정책 완화 진행" if np.isfinite(policy_6m) and policy_6m <= -0.25 else "정책 긴축/고금리 유지" if np.isfinite(policy_6m) and policy_6m >= 0.25 else "정책 정체",
+            "최근 관측일": _latest_date(fedfunds),
+            "해석": "한국은행 기준금리 레벨과 6개월 변화입니다. 레벨이 높고 내려오지 않으면 부채 부담 업종과 고PER 성장주를 보수적으로 봅니다.",
+        },
+        {
+            "영역": "성장",
+            "지표": "한국 실질 GDP YoY",
+            "현재": gdp_yoy,
+            "모멘텀": _change_periods(real_gdp.pct_change(4, fill_method=None) * 100.0, 1),
+            "상태": _macro_status(gdp_yoy, high=2.5, low=1.0, high_label="성장 견조", mid_label="성장 둔화", low_label="저성장 경계"),
+            "최근 관측일": _latest_date(real_gdp),
+            "해석": "한국 실질 GDP 전년 대비 성장률입니다. 느리지만 국내 경기 레짐의 기준점으로 사용합니다.",
+        },
+    ]
+    return pd.DataFrame(rows)
+
+
+def _dollar_sensitivity_table(dxy: pd.Series, commodity_series: pd.DataFrame, spx: pd.Series, *, fx_label: str) -> pd.DataFrame:
+    fx_ret = dxy.pct_change(fill_method=None).dropna().rename(fx_label)
+    assets = pd.concat([spx.rename("KOSPI200"), commodity_series], axis=1)
     rows = []
     for name in assets.columns:
         asset_ret = assets[name].pct_change(fill_method=None).dropna()
-        aligned = pd.concat([dxy_ret, asset_ret.rename(name)], axis=1).dropna().tail(120)
+        aligned = pd.concat([fx_ret, asset_ret.rename(name)], axis=1).dropna().tail(120)
         if len(aligned) < 30:
             corr_60d = beta = np.nan
         else:
             recent = aligned.tail(60)
-            corr_60d = float(recent["DXY"].corr(recent[name]))
-            var = float(recent["DXY"].var(ddof=1))
-            beta = float(recent["DXY"].cov(recent[name]) / var) if var > 0 and np.isfinite(var) else np.nan
+            corr_60d = float(recent[fx_label].corr(recent[name]))
+            var = float(recent[fx_label].var(ddof=1))
+            beta = float(recent[fx_label].cov(recent[name]) / var) if var > 0 and np.isfinite(var) else np.nan
         if np.isfinite(beta) and beta <= -0.4:
-            note = "최근 구간에서 달러가 오를 때 이 자산은 대체로 약했습니다. 달러 강세가 이어지면 수익률 훼손 가능성을 먼저 봅니다."
+            note = "최근 구간에서 환율·달러 지표가 오를 때 이 자산은 대체로 약했습니다. 같은 흐름이 이어지면 수익률 훼손 가능성을 먼저 봅니다."
         elif np.isfinite(beta) and beta >= 0.4:
-            note = "최근 구간에서 달러와 같은 방향으로 움직였습니다. 일반적인 역상관보다 안전자산 수요나 고유 수급 요인이 더 컸을 가능성이 있습니다."
+            note = "최근 구간에서 환율·달러 지표와 같은 방향으로 움직였습니다. 일반적인 역상관보다 안전자산 수요나 고유 수급 요인이 더 컸을 가능성이 있습니다."
         else:
-            note = "최근 60거래일 기준 달러 민감도는 제한적이거나 방향이 뚜렷하지 않습니다. 이 경우 달러보다 해당 자산의 자체 수급과 금리 변수를 더 봅니다."
+            note = "최근 60거래일 기준 환율 민감도는 제한적이거나 방향이 뚜렷하지 않습니다. 이 경우 해당 자산의 자체 수급과 금리 변수를 더 봅니다."
         rows.append(
             {
                 "대상": name,
                 "60D 상관": corr_60d,
-                "달러 베타": beta,
+                "환율 베타": beta,
                 "60D 수익률": _return_pct(assets[name], 60),
                 "해석": note,
             }
@@ -839,15 +1129,16 @@ def _dollar_sensitivity_table(dxy: pd.Series, commodity_series: pd.DataFrame, sp
     return pd.DataFrame(rows)
 
 
-def _sector_attribution_table(growth: float, inflation: float, policy: float, risk: float) -> pd.DataFrame:
+def _sector_attribution_table(growth: float, inflation: float, policy: float, risk: float, liquidity: float) -> pd.DataFrame:
     specs = [
-        ("Information Technology", 0.35 * growth, 0.0, 0.30 * (100 - policy), 0.35 * risk, "금리 재상승과 달러 강세가 겹치면 미래 이익의 현재가치가 눌리고, AI·소프트웨어처럼 장기 성장 기대가 높은 종목의 멀티플 조정이 커질 수 있습니다."),
-        ("Financials", 0.45 * growth, 0.0, 0.30 * policy, 0.25 * risk, "커브가 다시 역전되거나 신용 스프레드가 벌어지면 순이자마진 기대보다 대손비용 우려가 더 커질 수 있습니다."),
-        ("Energy", 0.25 * growth, 0.45 * inflation, 0.0, 0.30 * risk, "유가가 수요 둔화로 빠지면 인플레 방어 논리가 약해집니다. 단순 유가 상승인지, 수요가 동반된 상승인지 구분해야 합니다."),
-        ("Materials", 0.45 * growth, 0.35 * inflation, 0.0, 0.20 * risk, "구리와 산업금속이 약해지면 제조업·인프라 수요 기대가 식었다는 뜻일 수 있어 소재주의 이익 추정이 흔들릴 수 있습니다."),
-        ("Health Care", 0.25 * growth, 0.0, 0.50 * (100 - policy), 0.25 * risk, "위험선호가 강해지면 방어 프리미엄이 줄 수 있고, 정책·약가 이슈가 불거지면 업종 내부 차별화가 커집니다."),
-        ("Consumer Staples", 0.20 * growth, 0.60 * (100 - inflation), 0.0, 0.20 * risk, "원가 인플레가 재확대되면 수요 안정성에도 불구하고 마진이 눌릴 수 있습니다. 가격 전가력이 약한 기업은 더 취약합니다."),
-        ("Utilities / REITs", 0.20 * growth, 0.0, 0.60 * (100 - policy), 0.20 * risk, "장기금리가 다시 오르면 배당수익률 매력이 낮아지고 차입비용 부담이 커집니다. 특히 REITs는 리파이낸싱 조건을 봐야 합니다."),
+        ("반도체/IT", 0.30 * growth, 0.0, 0.15 * (100 - policy) + 0.25 * liquidity, 0.30 * risk, "환율 급등과 금리 재상승이 겹치면 외국인 수급과 고PER 멀티플이 같이 흔들릴 수 있습니다."),
+        ("자동차/수출제조", 0.40 * growth, 0.15 * (100 - inflation), 0.20 * liquidity, 0.25 * risk, "원화 약세 자체는 매출 환산에 우호적일 수 있지만 비용과 수요 둔화가 동반되면 마진 해석이 나빠집니다."),
+        ("금융", 0.35 * growth, 0.0, 0.30 * policy + 0.15 * liquidity, 0.20 * risk, "커브가 눌리고 위험선호가 약하면 순이자마진보다 대손 우려가 더 크게 반영될 수 있습니다."),
+        ("화학/소재", 0.45 * growth, 0.20 * (100 - inflation), 0.15 * liquidity, 0.20 * risk, "산업생산이 둔화되거나 환율·원가 부담이 커지면 스프레드 회복이 늦어질 수 있습니다."),
+        ("경기소비/유통", 0.35 * growth, 0.15 * (100 - inflation), 0.25 * (100 - policy), 0.25 * risk, "물가와 금리가 높으면 실질소득과 소비 여력이 줄어 매출 모멘텀이 약해질 수 있습니다."),
+        ("필수소비/음식료", 0.15 * growth, 0.45 * (100 - inflation), 0.20 * (100 - policy), 0.20 * risk, "원재료·환율 부담이 다시 커지면 방어주라도 마진 압박을 받을 수 있습니다."),
+        ("바이오/헬스케어", 0.20 * growth, 0.0, 0.35 * (100 - policy) + 0.15 * liquidity, 0.30 * risk, "금리 재상승과 위험선호 약화가 겹치면 장기 성장 기대의 할인율 부담이 커집니다."),
+        ("통신/유틸/배당", 0.10 * growth, 0.20 * (100 - inflation), 0.50 * (100 - policy), 0.20 * risk, "금리가 다시 오르면 배당수익률 매력과 차입비용 측면에서 부담이 커질 수 있습니다."),
     ]
     rows = []
     for sector, growth_c, inflation_c, policy_c, risk_c, risk_note in specs:
@@ -855,7 +1146,7 @@ def _sector_attribution_table(growth: float, inflation: float, policy: float, ri
             {
                 "섹터": sector,
                 "성장 기여": growth_c,
-                "물가/원자재 기여": inflation_c,
+                "물가/비용 기여": inflation_c,
                 "정책/금리 기여": policy_c,
                 "위험선호 기여": risk_c,
                 "선호 점수": growth_c + inflation_c + policy_c + risk_c,
@@ -875,265 +1166,221 @@ def build_macro_dashboard(
     tail_n = max(lookback + 60, 260)
 
     yield_ids = ["DGS1MO", "DGS3MO", "DGS6MO", "DGS1", "DGS2", "DGS3", "DGS5", "DGS7", "DGS10", "DGS20", "DGS30"]
-    sqlite_yields, sqlite_yield_source = read_macro_frame(yield_ids, start_date=start)
-    if sqlite_yields is not None and not sqlite_yields.empty:
-        yields, yield_source = sqlite_yields.ffill().bfill(), sqlite_yield_source or "macro_sqlite"
+    korea_yield_ids = ["KR_BASE_RATE", "KR_TBOND_3Y", "KR_TBOND_10Y", "KR_TBOND_30Y"]
+    korea_yields, korea_yield_source = read_macro_frame(korea_yield_ids, start_date=start)
+    korea_rates_active = korea_yields is not None and not korea_yields.empty
+    if korea_rates_active:
+        kr = korea_yields.ffill().bfill()
+        def _kr_col(name: str) -> pd.Series:
+            series = kr.get(name)
+            return pd.Series(np.nan, index=kr.index, name=name) if series is None else series
+
+        base = _kr_col("KR_BASE_RATE")
+        tbond3 = _kr_col("KR_TBOND_3Y")
+        tbond10 = _kr_col("KR_TBOND_10Y")
+        tbond30 = _kr_col("KR_TBOND_30Y")
+        yields = pd.DataFrame(index=kr.index)
+        yields["DGS1MO"] = base
+        yields["DGS3MO"] = base
+        yields["DGS6MO"] = base
+        yields["DGS1"] = base
+        yields["DGS2"] = tbond3
+        yields["DGS3"] = tbond3
+        yields["DGS5"] = pd.concat([tbond3, tbond10], axis=1).mean(axis=1, skipna=True)
+        yields["DGS7"] = pd.concat([tbond3, tbond10], axis=1).mean(axis=1, skipna=True)
+        yields["DGS10"] = tbond10
+        yields["DGS20"] = pd.concat([tbond10, tbond30], axis=1).mean(axis=1, skipna=True)
+        yields["DGS30"] = tbond30.combine_first(tbond10)
+        yields = yields.reindex(columns=yield_ids).ffill().bfill()
+        yield_source = korea_yield_source or "macro_sqlite:korea_rates"
     else:
-        yields, yield_source = load_yield_curve_df(yield_ids, start=start)
+        sqlite_yields, sqlite_yield_source = read_macro_frame(yield_ids, start_date=start)
+        if sqlite_yields is not None and not sqlite_yields.empty:
+            yields, yield_source = sqlite_yields.ffill().bfill(), sqlite_yield_source or "macro_sqlite"
+        else:
+            yields, yield_source = load_yield_curve_df(yield_ids, start=start)
     yields = yields.tail(tail_n).copy()
 
-    components, components_source = load_krx_components(max_symbols=120)
-    symbols = components["Symbol"].astype(str).head(120).tolist()
+    equity_label = "KOSPI200"
+    components, components_source = _load_kospi200_components(max_symbols=200)
+    symbols = components["Symbol"].astype(str).head(200).tolist()
     prices, price_source = fetch_krx_close_prices(symbols, start)
     prices = prices.tail(tail_n).copy()
-    spx = _cap_weighted_series(prices, symbols)
+    weights = (
+        components.set_index("Symbol")["benchmark_weight"]
+        if "benchmark_weight" in components.columns
+        else None
+    )
+    proxy_spx = _cap_weighted_series(prices, symbols, weights=weights, name=equity_label)
+    kospi200_series, kospi200_source = read_macro_series("KOSPI200", start_date=start)
+    if kospi200_series is not None and not kospi200_series.empty:
+        spx = kospi200_series.tail(tail_n).rename(equity_label)
+        equity_source = kospi200_source or "macro_sqlite:KOSPI200"
+    else:
+        spx = proxy_spx
+        equity_source = f"{price_source}:weighted_proxy"
 
-    dxy, dxy_source = _load_local_or_fallback(
-        "DXY",
-        env_name="DXY_CSV_PATH",
-        filenames=["data/dxy.csv", "data/DXY.csv"],
+    dxy, dxy_source = _load_preferred_macro_series(
+        "USD/KRW",
+        sqlite_ids=["KR_USDKRW", "DXY"],
+        env_name="USDKRW_CSV_PATH",
+        filenames=["data/korea_usdkrw.csv", "data/usdkrw.csv", "data/dxy.csv", "data/DXY.csv"],
         start=start,
-        base=100.0,
-        drift=0.00005,
-        vol=0.004,
+        fallback_base=1350.0,
+        fallback_mean=1320.0,
+        fallback_speed=0.010,
+        fallback_vol=5.5,
         seed=7,
     )
-    vix, vix_source = _load_fred_or_local_series(
-        "VIX",
-        fred_id="VIXCLS",
-        sqlite_id="VIX",
-        env_name="VIX_CSV_PATH",
-        filenames=["data/vix.csv", "data/VIX.csv"],
-        start=start,
-        fallback_base=18.0,
-        fallback_mean=19.0,
-        fallback_speed=0.04,
-        fallback_vol=0.65,
-        seed=31,
-    )
-    ig_oas, ig_oas_source = _load_fred_or_local_series(
-        "Investment Grade OAS",
-        fred_id="BAMLC0A0CM",
-        sqlite_id="IG_OAS",
-        env_name="IG_OAS_CSV_PATH",
-        filenames=["data/ig_oas.csv", "data/investment_grade_oas.csv"],
-        start=start,
-        fallback_base=1.15,
-        fallback_mean=1.35,
-        fallback_speed=0.025,
-        fallback_vol=0.025,
-        seed=32,
-    )
-    hy_oas, hy_oas_source = _load_fred_or_local_series(
-        "High Yield OAS",
-        fred_id="BAMLH0A0HYM2",
-        sqlite_id="HY_OAS",
-        env_name="HY_OAS_CSV_PATH",
-        filenames=["data/hy_oas.csv", "data/high_yield_oas.csv"],
-        start=start,
-        fallback_base=3.8,
-        fallback_mean=4.3,
-        fallback_speed=0.025,
-        fallback_vol=0.070,
-        seed=33,
-    )
-    baa_spread, baa_source = _load_fred_or_local_series(
-        "Baa-10Y Spread",
-        fred_id="BAA10Y",
-        env_name="BAA10Y_CSV_PATH",
-        filenames=["data/baa10y.csv", "data/baa_10y.csv"],
-        start=start,
-        fallback_base=2.15,
-        fallback_mean=2.20,
-        fallback_speed=0.020,
-        fallback_vol=0.030,
-        seed=34,
-    )
-    aaa_spread, aaa_source = _load_fred_or_local_series(
-        "Aaa-10Y Spread",
-        fred_id="AAA10Y",
-        env_name="AAA10Y_CSV_PATH",
-        filenames=["data/aaa10y.csv", "data/aaa_10y.csv"],
-        start=start,
-        fallback_base=0.75,
-        fallback_mean=0.85,
-        fallback_speed=0.020,
-        fallback_vol=0.020,
-        seed=35,
-    )
-    unrate, unrate_source = _load_fred_or_local_series(
-        "Unemployment Rate",
-        fred_id="UNRATE",
+    fx_label = "USD/KRW" if ("KR_USDKRW" in dxy_source or "korea_usdkrw" in dxy_source or dxy_source == "fallback") else "DXY"
+    vix = pd.Series(dtype=float, name="VIX")
+    ig_oas = pd.Series(dtype=float, name="Investment Grade OAS")
+    hy_oas = pd.Series(dtype=float, name="High Yield OAS")
+    baa_spread = pd.Series(dtype=float, name="Baa-10Y Spread")
+    aaa_spread = pd.Series(dtype=float, name="Aaa-10Y Spread")
+    unrate, unrate_source = _load_preferred_macro_series(
+        "Korea Unemployment Rate",
+        sqlite_ids=["KR_UNRATE", "UNRATE"],
         env_name="UNRATE_CSV_PATH",
-        filenames=["data/unrate.csv", "data/UNRATE.csv"],
+        filenames=["data/korea_unemployment_rate.csv", "data/unrate.csv", "data/UNRATE.csv"],
         start=start,
         fallback_base=4.0,
         fallback_mean=4.2,
         fallback_speed=0.030,
         fallback_vol=0.035,
         seed=41,
+        fred_id="UNRATE",
     )
-    payrolls, payrolls_source = _load_fred_or_local_series(
-        "Nonfarm Payrolls",
-        fred_id="PAYEMS",
+    payrolls, payrolls_source = _load_preferred_macro_series(
+        "Korea Employed Persons",
+        sqlite_ids=["KR_EMPLOYED", "PAYEMS"],
         env_name="PAYEMS_CSV_PATH",
-        filenames=["data/payems.csv", "data/nonfarm_payrolls.csv"],
+        filenames=["data/korea_employed.csv", "data/payems.csv", "data/nonfarm_payrolls.csv"],
         start=start,
-        fallback_base=158000.0,
-        fallback_mean=158500.0,
+        fallback_base=28500.0,
+        fallback_mean=28700.0,
         fallback_speed=0.004,
-        fallback_vol=90.0,
+        fallback_vol=18.0,
         seed=42,
+        fred_id="PAYEMS",
     )
-    cpi, cpi_source = _load_fred_or_local_series(
-        "CPI",
-        fred_id="CPIAUCSL",
+    cpi, cpi_source = _load_preferred_macro_series(
+        "Korea CPI",
+        sqlite_ids=["KR_CPI", "CPIAUCSL"],
         env_name="CPI_CSV_PATH",
-        filenames=["data/cpi.csv", "data/CPIAUCSL.csv"],
+        filenames=["data/korea_cpi.csv", "data/cpi.csv", "data/CPIAUCSL.csv"],
         start=start,
-        fallback_base=310.0,
-        fallback_mean=325.0,
+        fallback_base=113.0,
+        fallback_mean=116.0,
         fallback_speed=0.004,
-        fallback_vol=0.20,
+        fallback_vol=0.10,
         seed=43,
+        fred_id="CPIAUCSL",
     )
-    core_pce, core_pce_source = _load_fred_or_local_series(
-        "Core PCE",
-        fred_id="PCEPILFE",
+    core_pce, core_pce_source = _load_preferred_macro_series(
+        "Korea Core CPI",
+        sqlite_ids=["KR_CORE_CPI", "KR_CPI", "PCEPILFE"],
         env_name="CORE_PCE_CSV_PATH",
-        filenames=["data/core_pce.csv", "data/PCEPILFE.csv"],
+        filenames=["data/korea_core_cpi.csv", "data/korea_cpi.csv", "data/core_pce.csv", "data/PCEPILFE.csv"],
         start=start,
-        fallback_base=130.0,
-        fallback_mean=136.0,
+        fallback_base=112.0,
+        fallback_mean=115.0,
         fallback_speed=0.004,
         fallback_vol=0.08,
         seed=44,
+        fred_id="PCEPILFE",
     )
-    indpro, indpro_source = _load_fred_or_local_series(
-        "Industrial Production",
-        fred_id="INDPRO",
+    indpro, indpro_source = _load_preferred_macro_series(
+        "Korea Industrial Production",
+        sqlite_ids=["KR_IPI", "INDPRO"],
         env_name="INDPRO_CSV_PATH",
-        filenames=["data/indpro.csv", "data/industrial_production.csv"],
+        filenames=["data/korea_industrial_production.csv", "data/indpro.csv", "data/industrial_production.csv"],
         start=start,
         fallback_base=103.0,
         fallback_mean=104.0,
         fallback_speed=0.010,
         fallback_vol=0.08,
         seed=45,
+        fred_id="INDPRO",
     )
-    retail_sales, retail_source = _load_fred_or_local_series(
-        "Retail Sales",
-        fred_id="RSAFS",
+    retail_sales, retail_source = _load_preferred_macro_series(
+        "Korea Retail Sales",
+        sqlite_ids=["KR_RETAIL", "RSAFS"],
         env_name="RETAIL_SALES_CSV_PATH",
-        filenames=["data/retail_sales.csv", "data/RSAFS.csv"],
+        filenames=["data/korea_retail_sales.csv", "data/retail_sales.csv", "data/RSAFS.csv"],
         start=start,
-        fallback_base=700000.0,
-        fallback_mean=720000.0,
+        fallback_base=110.0,
+        fallback_mean=114.0,
         fallback_speed=0.004,
-        fallback_vol=850.0,
+        fallback_vol=0.30,
         seed=46,
+        fred_id="RSAFS",
     )
-    housing_starts, housing_source = _load_fred_or_local_series(
-        "Housing Starts",
-        fred_id="HOUST",
+    housing_starts, housing_source = _load_preferred_macro_series(
+        "Korea Construction Starts",
+        sqlite_ids=["KR_CONSTRUCTION", "KR_RETAIL", "HOUST"],
         env_name="HOUSING_STARTS_CSV_PATH",
-        filenames=["data/houst.csv", "data/housing_starts.csv"],
+        filenames=["data/korea_construction.csv", "data/korea_retail_sales.csv", "data/houst.csv", "data/housing_starts.csv"],
         start=start,
-        fallback_base=1400.0,
-        fallback_mean=1450.0,
+        fallback_base=100.0,
+        fallback_mean=102.0,
         fallback_speed=0.015,
-        fallback_vol=12.0,
+        fallback_vol=0.50,
         seed=47,
+        fred_id="HOUST",
     )
-    consumer_sentiment, sentiment_source = _load_fred_or_local_series(
-        "Consumer Sentiment",
-        fred_id="UMCSENT",
+    consumer_sentiment, sentiment_source = _load_preferred_macro_series(
+        "Korea Consumer Sentiment",
+        sqlite_ids=["KR_CCSI", "KR_RETAIL", "UMCSENT"],
         env_name="UMCSENT_CSV_PATH",
-        filenames=["data/umcsent.csv", "data/consumer_sentiment.csv"],
+        filenames=["data/korea_consumer_sentiment.csv", "data/korea_retail_sales.csv", "data/umcsent.csv", "data/consumer_sentiment.csv"],
         start=start,
-        fallback_base=70.0,
-        fallback_mean=78.0,
+        fallback_base=100.0,
+        fallback_mean=100.0,
         fallback_speed=0.020,
-        fallback_vol=0.75,
+        fallback_vol=0.55,
         seed=48,
+        fred_id="UMCSENT",
     )
-    m2, m2_source = _load_fred_or_local_series(
-        "M2",
-        fred_id="M2SL",
+    m2, m2_source = _load_preferred_macro_series(
+        "Korea M2",
+        sqlite_ids=["KR_M2", "M2SL"],
         env_name="M2_CSV_PATH",
-        filenames=["data/m2.csv", "data/M2SL.csv"],
+        filenames=["data/korea_m2.csv", "data/m2.csv", "data/M2SL.csv"],
         start=start,
-        fallback_base=21000.0,
-        fallback_mean=22000.0,
+        fallback_base=4100.0,
+        fallback_mean=4300.0,
         fallback_speed=0.003,
-        fallback_vol=35.0,
+        fallback_vol=6.0,
         seed=49,
+        fred_id="M2SL",
     )
-    fedfunds, fedfunds_source = _load_fred_or_local_series(
-        "Fed Funds",
-        fred_id="FEDFUNDS",
+    fedfunds, fedfunds_source = _load_preferred_macro_series(
+        "Korea Base Rate",
+        sqlite_ids=["KR_BASE_RATE", "FEDFUNDS"],
         env_name="FEDFUNDS_CSV_PATH",
-        filenames=["data/fedfunds.csv", "data/FEDFUNDS.csv"],
+        filenames=["data/korea_base_rate.csv", "data/fedfunds.csv", "data/FEDFUNDS.csv"],
         start=start,
-        fallback_base=4.4,
-        fallback_mean=3.8,
+        fallback_base=3.5,
+        fallback_mean=3.0,
         fallback_speed=0.020,
         fallback_vol=0.025,
         seed=50,
+        fred_id="FEDFUNDS",
     )
-    real_gdp, gdp_source = _load_fred_or_local_series(
-        "Real GDP",
-        fred_id="GDPC1",
+    real_gdp, gdp_source = _load_preferred_macro_series(
+        "Korea Real GDP",
+        sqlite_ids=["KR_GDP", "GDPC1"],
         env_name="REAL_GDP_CSV_PATH",
-        filenames=["data/gdpc1.csv", "data/real_gdp.csv"],
+        filenames=["data/korea_real_gdp.csv", "data/gdpc1.csv", "data/real_gdp.csv"],
         start=start,
-        fallback_base=23000.0,
-        fallback_mean=23500.0,
+        fallback_base=560000.0,
+        fallback_mean=590000.0,
         fallback_speed=0.003,
-        fallback_vol=35.0,
+        fallback_vol=800.0,
         seed=51,
+        fred_id="GDPC1",
     )
-    wti, wti_source = _load_local_or_fallback(
-        "WTI Crude",
-        env_name="WTI_CSV_PATH",
-        filenames=["data/wti.csv", "data/oil.csv", "data/crude_oil.csv"],
-        start=start,
-        base=78.0,
-        drift=0.00004,
-        vol=0.018,
-        seed=21,
-    )
-    gold, gold_source = _load_local_or_fallback(
-        "Gold",
-        env_name="GOLD_CSV_PATH",
-        filenames=["data/gold.csv", "data/xau.csv"],
-        start=start,
-        base=2050.0,
-        drift=0.00012,
-        vol=0.009,
-        seed=22,
-    )
-    silver, silver_source = _load_local_or_fallback(
-        "Silver",
-        env_name="SILVER_CSV_PATH",
-        filenames=["data/silver.csv", "data/xag.csv"],
-        start=start,
-        base=24.0,
-        drift=0.00010,
-        vol=0.014,
-        seed=23,
-    )
-    copper, copper_source = _load_local_or_fallback(
-        "Copper",
-        env_name="COPPER_CSV_PATH",
-        filenames=["data/copper.csv", "data/hg.csv"],
-        start=start,
-        base=4.0,
-        drift=0.00008,
-        vol=0.013,
-        seed=24,
-    )
-
     dxy = dxy.tail(tail_n)
     vix = vix.tail(tail_n)
     ig_oas = ig_oas.tail(tail_n)
@@ -1151,7 +1398,17 @@ def build_macro_dashboard(
     m2 = m2.tail(tail_n)
     fedfunds = fedfunds.tail(tail_n)
     real_gdp = real_gdp.tail(tail_n)
-    commodity_series = pd.concat([wti, gold, silver, copper], axis=1).tail(tail_n).dropna(how="all")
+    dxy_monthly = dxy.resample("MS").last().dropna() if not dxy.empty else dxy
+    domestic_series = pd.concat(
+        [
+            dxy_monthly.rename(fx_label),
+            cpi.rename("CPI"),
+            consumer_sentiment.rename("Consumer Sentiment"),
+            retail_sales.rename("Retail Sales"),
+            m2.rename("M2"),
+        ],
+        axis=1,
+    ).sort_index().ffill().tail(tail_n).dropna(how="all")
     baa_aaa_spread = (baa_spread - aaa_spread).dropna().rename("Baa-AAA Spread")
     dgs2 = yields["DGS2"] if "DGS2" in yields else pd.Series(dtype=float)
     dgs3m = yields["DGS3MO"] if "DGS3MO" in yields else pd.Series(dtype=float)
@@ -1163,7 +1420,7 @@ def build_macro_dashboard(
     curve_5y_2y = (dgs5 - dgs2).dropna().rename("5Y-2Y")
     curve_30y_10y = (dgs30 - dgs10).dropna().rename("30Y-10Y")
 
-    latest_dates = [idx.max() for idx in [yields.index, prices.index, dxy.index, vix.index, ig_oas.index, hy_oas.index, spx.index, commodity_series.index] if len(idx) > 0]
+    latest_dates = [idx.max() for idx in [yields.index, prices.index, dxy.index, spx.index, domestic_series.index] if len(idx) > 0]
     as_of = max(latest_dates).strftime("%Y-%m-%d") if latest_dates else "-"
 
     risk_return_20d = _return_pct(spx, 20)
@@ -1173,37 +1430,44 @@ def build_macro_dashboard(
     rolling_vol = (spx_daily.rolling(20).std(ddof=1) * np.sqrt(252) * 100.0).dropna().rename("20D Ann Vol")
     drawdown = ((spx / spx.cummax() - 1.0) * 100.0).dropna().rename("Drawdown")
 
-    commodity_basket = commodity_series.pct_change(fill_method=None).mean(axis=1).dropna()
+    domestic_basket = domestic_series.pct_change(fill_method=None).mean(axis=1).dropna()
+    cpi_momentum = (cpi.pct_change(12, fill_method=None) * 100.0).dropna()
+    sentiment_momentum = (consumer_sentiment.pct_change(12, fill_method=None) * 100.0).dropna()
+    retail_momentum = (retail_sales.pct_change(12, fill_method=None) * 100.0).dropna()
+    m2_momentum = (m2.pct_change(12, fill_method=None) * 100.0).dropna()
     growth_score = np.nanmean(
         [
             _score_from_z(_zscore(spx_daily.rolling(20).sum().dropna())),
             _score_from_z(_zscore(curve_10y_2y)),
-            _score_from_z(_zscore(commodity_series["Copper"].pct_change(fill_method=None).rolling(20).sum().dropna())),
+            _score_from_z(_zscore(sentiment_momentum)),
+            _score_from_z(_zscore(retail_momentum)),
         ]
     )
     inflation_score = np.nanmean(
         [
             _score_from_z(_zscore(dgs10)),
             _score_from_z(_zscore(dxy)),
-            _score_from_z(_zscore(commodity_basket.rolling(20).sum().dropna())),
+            _score_from_z(_zscore(cpi_momentum)),
         ]
     )
     policy_score = np.nanmean([_score_from_z(_zscore(dgs2)), _score_from_z(_zscore(dgs10))])
     vol_penalty = 50.0 if not np.isfinite(realized_vol_20d) else float(np.clip(100.0 - (realized_vol_20d - 8.0) * 3.0, 0.0, 100.0))
-    credit_stress_score = np.nanmean(
+    fx_vol = (dxy.pct_change(fill_method=None).dropna().rolling(20).std(ddof=1) * np.sqrt(252) * 100.0).dropna().rename("USD/KRW 20D Ann Vol")
+    domestic_stress_score = np.nanmean(
         [
-            _score_from_z(_zscore(vix), inverse=True),
-            _score_from_z(_zscore(ig_oas), inverse=True),
-            _score_from_z(_zscore(hy_oas), inverse=True),
+            _score_from_z(_zscore(rolling_vol), inverse=True),
+            _score_from_z(_zscore(drawdown)),
+            _score_from_z(_zscore(fx_vol), inverse=True),
+            _score_from_z(_zscore(curve_10y_2y)),
         ]
     )
-    risk_score = np.nanmean([_score_from_z(_zscore(spx)), _score_from_z(_zscore(drawdown)), vol_penalty, credit_stress_score])
+    risk_score = np.nanmean([_score_from_z(_zscore(spx)), _score_from_z(_zscore(drawdown)), vol_penalty, domestic_stress_score])
     recession_score = np.nanmean([_score_from_z(_zscore(curve_10y_2y), inverse=True), _score_from_z(_zscore(spx), inverse=True)])
     liquidity_score = np.nanmean([_score_from_z(_zscore(dgs10), inverse=True), _score_from_z(_zscore(dxy), inverse=True), _score_from_z(_zscore(spx))])
 
     scores_map = {
         "성장 모멘텀": growth_score,
-        "인플레/원자재 압력": inflation_score,
+        "물가/비용 압력": inflation_score,
         "정책 긴축도": policy_score,
         "위험선호": risk_score,
         "침체 리스크": recession_score,
@@ -1213,14 +1477,30 @@ def build_macro_dashboard(
 
     summary = pd.DataFrame(
         [
-            {"항목": "거시 국면", "값": regime_label, "해석": "성장, 원자재, 정책금리, 장단기 커브, 위험선호를 묶어 현재 시장이 어느 환경에 가까운지 요약합니다. 단일 지표가 아니라 서로 다른 자산군의 신호가 같은 방향인지 보는 출발점입니다."},
+            {"항목": "거시 국면", "값": regime_label, "해석": "성장, 물가·비용, 정책금리, 장단기 커브, 위험선호를 묶어 현재 시장이 어느 환경에 가까운지 요약합니다. 단일 지표가 아니라 서로 다른 자산군의 신호가 같은 방향인지 보는 출발점입니다."},
             {"항목": "리스크 레벨", "값": risk_level, "해석": "변동성, 낙폭, 성장 둔화 신호를 함께 본 위험 단계입니다. 높을수록 손실 방어와 현금흐름 안정성을 우선하고, 낮을수록 위험자산 확대 여지를 검토합니다."},
             {"항목": "주식 비중 의견", "값": equity_bias, "해석": "현재 거시 조합에서 주식 노출을 공격적으로 둘지, 선별적으로 둘지, 방어적으로 둘지에 대한 상위 가이드입니다. 개별 종목 판단 전 포트폴리오의 기본 기울기를 정하는 용도입니다."},
             {"항목": "기준일", "값": as_of, "해석": "분석에 사용된 로컬 데이터의 최신 관측일입니다. 일부 자산은 휴장일이나 데이터 제공 지연 때문에 기준일이 서로 다를 수 있어, 최신성 확인용으로 표시합니다."},
         ]
     )
     scores = pd.DataFrame([{"점수": key, "값": float(np.clip(value, 0, 100)) if np.isfinite(value) else np.nan} for key, value in scores_map.items()])
-    fred_macro = _fred_macro_table(
+    korea_macro_active = any(
+        "KR_" in source
+        for source in [
+            unrate_source,
+            payrolls_source,
+            cpi_source,
+            core_pce_source,
+            indpro_source,
+            retail_source,
+            sentiment_source,
+            m2_source,
+            fedfunds_source,
+            gdp_source,
+        ]
+    )
+    macro_table_builder = _korea_macro_table if korea_macro_active else _fred_macro_table
+    fred_macro = macro_table_builder(
         unrate=unrate,
         payrolls=payrolls,
         cpi=cpi,
@@ -1241,7 +1521,8 @@ def build_macro_dashboard(
         dgs2=dgs2,
         dgs10=dgs10,
         dxy=dxy,
-        commodity_basket=commodity_basket,
+        dxy_label=fx_label,
+        domestic_basket=domestic_basket,
     )
     regime_scenarios = _regime_scenario_table(
         growth_score,
@@ -1253,13 +1534,13 @@ def build_macro_dashboard(
     )
     indicators = pd.DataFrame(
         [
-            {"지표": "KRX 20D 수익률", "현재": risk_return_20d, "단위": "%", "해석": "최근 한 달 안팎의 위험자산 모멘텀입니다. 플러스이면 단기 매수세가 살아 있다는 뜻이고, 마이너스이면 방어적 포지셔닝이나 현금비중 점검이 필요합니다."},
-            {"지표": "KRX 60D 수익률", "현재": risk_return_60d, "단위": "%", "해석": "분기 단위의 중기 추세를 봅니다. 20D는 좋지만 60D가 약하면 단기 반등일 수 있고, 둘 다 강하면 위험선호가 더 견고하다고 봅니다."},
+            {"지표": f"{equity_label} 20D 수익률", "현재": risk_return_20d, "단위": "%", "해석": "최근 한 달 안팎의 위험자산 모멘텀입니다. 플러스이면 단기 매수세가 살아 있다는 뜻이고, 마이너스이면 방어적 포지셔닝이나 현금비중 점검이 필요합니다."},
+            {"지표": f"{equity_label} 60D 수익률", "현재": risk_return_60d, "단위": "%", "해석": "분기 단위의 중기 추세를 봅니다. 20D는 좋지만 60D가 약하면 단기 반등일 수 있고, 둘 다 강하면 위험선호가 더 견고하다고 봅니다."},
             {"지표": "20D 연율 변동성", "현재": realized_vol_20d, "단위": "연 %", "해석": "최근 일간 수익률의 흔들림을 연율화한 값입니다. 높을수록 같은 주식 비중이라도 포트폴리오 손익 변동이 커지므로 포지션 크기와 손실 한도를 보수적으로 둡니다."},
             {"지표": "현재 낙폭", "현재": _latest_value(drawdown), "단위": "%", "해석": "최근 고점 대비 얼마나 내려와 있는지입니다. 낙폭이 깊으면 가격 매력은 생길 수 있지만, 회복에는 breadth와 변동성 안정이 같이 필요합니다."},
             {"지표": "10Y-2Y 스프레드", "현재": _latest_value(curve_10y_2y), "단위": "%p", "해석": "장기 성장 기대와 단기 정책 부담의 차이입니다. 음수이면 정책금리가 장기 성장 기대보다 높다는 뜻이라 경기 둔화와 금융주 마진 압력을 함께 경계합니다."},
-            {"지표": "원자재 바스켓 60D 수익률", "현재": _return_pct((1.0 + commodity_basket).cumprod(), 60), "단위": "%", "해석": "WTI, 금, 은, 구리의 평균 흐름으로 물가 압력과 실물 수요를 함께 봅니다. 에너지·구리 중심 상승이면 경기민감 수요, 금 중심 상승이면 안전자산 수요일 수 있습니다."},
-            {"지표": "DXY 60D 변화율", "현재": _return_pct(dxy, 60), "단위": "%", "해석": "달러 강세는 글로벌 유동성 축소, 해외매출 환산 부담, 원자재 가격 압박으로 이어질 수 있습니다. 달러가 빠지면 비미국 자산과 성장주에는 숨통이 트입니다."},
+            {"지표": "국내 비용/활동 바스켓 60D", "현재": _return_since_days((1.0 + domestic_basket).cumprod(), 60), "단위": "%", "해석": "CPI, 원/달러, 소비자심리, 소매판매, M2를 묶어 국내 비용 압력과 수요 활동을 함께 봅니다. 기존 원자재 폴백 차트 대신 실제 한국 DB 시리즈만 사용합니다."},
+            {"지표": f"{fx_label} 60D 변화율", "현재": _return_pct(dxy, 60), "단위": "%", "해석": f"환율·달러 지표 상승은 외국인 수급과 수입 원가, 글로벌 유동성 부담으로 이어질 수 있습니다. 안정되면 {equity_label} 위험선호와 마진 부담 완화에 도움이 됩니다."},
         ]
     )
     rates = pd.DataFrame(
@@ -1286,48 +1567,53 @@ def build_macro_dashboard(
     )
     risk_assets = pd.DataFrame(
         [
-            {"자산": "KRX Proxy", "20D 수익률": risk_return_20d, "60D 수익률": risk_return_60d, "20D 연율 변동성": realized_vol_20d, "현재 낙폭": _latest_value(drawdown), "판독": "주식 위험선호의 핵심 온도계입니다. 수익률이 플러스이고 변동성과 낙폭이 낮으면 위험자산 확대 여지가 커지고, 반대 조합이면 방어적 해석을 우선합니다."},
-            {"자산": "DXY", "20D 수익률": _return_pct(dxy, 20), "60D 수익률": _return_pct(dxy, 60), "20D 연율 변동성": float(dxy.pct_change(fill_method=None).dropna().tail(20).std(ddof=1) * np.sqrt(252) * 100.0), "현재 낙폭": _latest_value((dxy / dxy.cummax() - 1.0) * 100.0), "판독": "달러는 위험자산의 반대편 유동성 지표로 씁니다. 달러가 강하고 변동성도 높으면 글로벌 자금이 안전자산 쪽으로 이동하는 신호일 수 있습니다."},
+            {"자산": equity_label, "20D 수익률": risk_return_20d, "60D 수익률": risk_return_60d, "20D 연율 변동성": realized_vol_20d, "현재 낙폭": _latest_value(drawdown), "판독": "주식 위험선호의 핵심 온도계입니다. 수익률이 플러스이고 변동성과 낙폭이 낮으면 위험자산 확대 여지가 커지고, 반대 조합이면 방어적 해석을 우선합니다."},
+            {"자산": fx_label, "20D 수익률": _return_pct(dxy, 20), "60D 수익률": _return_pct(dxy, 60), "20D 연율 변동성": float(dxy.pct_change(fill_method=None).dropna().tail(20).std(ddof=1) * np.sqrt(252) * 100.0), "현재 낙폭": _latest_value((dxy / dxy.cummax() - 1.0) * 100.0), "판독": f"환율·달러 지표는 {equity_label} 외국인 수급과 글로벌 유동성 부담을 읽는 핵심 지표입니다. 상승과 변동성 확대가 겹치면 방어적 해석을 강화합니다."},
         ]
     )
     risk_breadth = _risk_breadth_table(prices, spx)
-    risk_stress = _risk_stress_table(vix, ig_oas, hy_oas, baa_aaa_spread)
-    commodity_rows = [
-        ("WTI Crude", commodity_series["WTI Crude"], "원유는 에너지 비용과 기대 인플레에 직접 연결됩니다. 상승이 수요 개선 때문인지 공급 충격 때문인지에 따라 에너지주에는 호재, 소비·운송·마진 민감 업종에는 부담으로 갈립니다."),
-        ("Gold", commodity_series["Gold"], "금은 실질금리, 달러, 안전자산 수요의 교차점입니다. 금이 오르면서 주식도 약하면 방어 수요가 강하다는 뜻이고, 달러 약세와 함께 오르면 유동성 완화 신호일 수 있습니다."),
-        ("Silver", commodity_series["Silver"], "은은 귀금속과 산업금속 성격을 동시에 가집니다. 금보다 강하면 제조업·태양광 등 산업 수요 기대가 섞였을 수 있고, 금과 같이 강하면 안전자산 수요를 의심합니다."),
-        ("Copper", commodity_series["Copper"], "구리는 글로벌 제조업, 중국·인프라 수요, 전기화 투자 기대에 민감합니다. 성장 모멘텀 점수와 같이 보면 경기민감 업종 선호의 신뢰도를 판단하는 데 도움이 됩니다."),
+    risk_stress = _risk_stress_table(
+        vix,
+        ig_oas,
+        hy_oas,
+        baa_aaa_spread,
+        krx_vol=rolling_vol,
+        krx_drawdown=drawdown,
+        fx_vol=fx_vol,
+        curve_10y_2y=curve_10y_2y,
+    )
+    domestic_rows = [
+        (fx_label, domestic_series[fx_label], f"환율 상승은 외국인 수급 부담, 수입 원가, 헤지 비용으로 이어질 수 있습니다. {equity_label}와 함께 보면 원화 약세가 시장에 부담인지 방어인지 구분하는 데 도움이 됩니다."),
+        ("CPI", domestic_series["CPI"], "소비자물가 지수입니다. 전년 대비 상승률과 방향을 함께 보며, 높을수록 소비 여력과 기업 마진에 부담을 줄 수 있습니다."),
+        ("Consumer Sentiment", domestic_series["Consumer Sentiment"], "한국 소비자심리지수(CCSI)입니다. 기준선 100 전후와 방향을 함께 보며, 내수·소비 업종의 수요 기대를 읽는 보조 지표로 씁니다."),
+        ("Retail Sales", domestic_series["Retail Sales"], "국내 소매판매 흐름입니다. 내수 소비와 경기소비 업종의 기본 온도를 읽는 데 사용합니다."),
+        ("M2", domestic_series["M2"], "광의통화 증가 흐름입니다. 국내 유동성 여건을 보는 보조 지표입니다."),
     ]
     dollar_commodities = pd.DataFrame(
         [
-            {"지표": "DXY", "현재": _latest_value(dxy), "20D 변화율": _return_pct(dxy, 20), "60D 변화율": _return_pct(dxy, 60), "20D 연율 변동성": float(dxy.pct_change(fill_method=None).dropna().tail(20).std(ddof=1) * np.sqrt(252) * 100.0), "해석": "달러 강세는 글로벌 유동성을 흡수하고 비미국 매출 환산, 원자재 가격, 신흥국 금융여건에 부담을 줄 수 있습니다. 달러 약세는 반대로 위험자산과 원자재에 완충 역할을 합니다."},
             *[
                 {
                     "지표": name,
                     "현재": _latest_value(series),
-                    "20D 변화율": _return_pct(series, 20),
-                    "60D 변화율": _return_pct(series, 60),
-                    "20D 연율 변동성": float(series.pct_change(fill_method=None).dropna().tail(20).std(ddof=1) * np.sqrt(252) * 100.0),
+                    "20D 변화율": _return_since_days(series, 20),
+                    "60D 변화율": _return_since_days(series, 60),
+                    "최근 12개월 변동성": _annualized_recent_vol(series, 12),
                     "해석": note,
                 }
-                for name, series, note in commodity_rows
+                for name, series, note in domestic_rows
             ],
         ]
     )
-    dollar_sensitivity = _dollar_sensitivity_table(dxy, commodity_series, spx)
-    sector_bias = _sector_bias_table(growth_score, inflation_score, policy_score, risk_score)
-    sector_attribution = _sector_attribution_table(growth_score, inflation_score, policy_score, risk_score)
+    dollar_sensitivity = _dollar_sensitivity_table(dxy, domestic_series.drop(columns=[fx_label], errors="ignore"), spx, fx_label=fx_label)
+    sector_bias = _sector_bias_table(growth_score, inflation_score, policy_score, risk_score, liquidity_score)
+    sector_attribution = _sector_attribution_table(growth_score, inflation_score, policy_score, risk_score, liquidity_score)
     sources = pd.DataFrame(
         [
-            {"데이터": "KRX 구성", "출처": components_source},
-            {"데이터": "KRX 가격", "출처": price_source},
-            {"데이터": "미국 금리", "출처": yield_source},
-            {"데이터": "DXY", "출처": dxy_source},
-            {"데이터": "VIX", "출처": vix_source},
-            {"데이터": "투자등급 회사채 OAS", "출처": ig_oas_source},
-            {"데이터": "하이일드 OAS", "출처": hy_oas_source},
-            {"데이터": "Baa-10Y 스프레드", "출처": baa_source},
-            {"데이터": "Aaa-10Y 스프레드", "출처": aaa_source},
+            {"데이터": f"{equity_label} 구성", "출처": components_source},
+            {"데이터": f"{equity_label} 지수", "출처": equity_source},
+            {"데이터": f"{equity_label} 구성종목 가격", "출처": price_source},
+            {"데이터": "한국 금리" if korea_rates_active else "미국 금리", "출처": yield_source},
+            {"데이터": fx_label, "출처": dxy_source},
             {"데이터": "실업률", "출처": unrate_source},
             {"데이터": "비농업 고용", "출처": payrolls_source},
             {"데이터": "CPI", "출처": cpi_source},
@@ -1337,19 +1623,15 @@ def build_macro_dashboard(
             {"데이터": "주택착공", "출처": housing_source},
             {"데이터": "소비심리", "출처": sentiment_source},
             {"데이터": "M2", "출처": m2_source},
-            {"데이터": "Fed Funds", "출처": fedfunds_source},
+            {"데이터": "기준금리", "출처": fedfunds_source},
             {"데이터": "실질 GDP", "출처": gdp_source},
-            {"데이터": "WTI Crude", "출처": wti_source},
-            {"데이터": "Gold", "출처": gold_source},
-            {"데이터": "Silver", "출처": silver_source},
-            {"데이터": "Copper", "출처": copper_source},
         ]
     )
-    market_series = pd.concat([spx.rename("KRX"), dxy.rename("DXY"), commodity_series["Gold"].rename("Gold")], axis=1).dropna(how="all")
+    market_series = pd.concat([spx.rename(equity_label), dxy.rename(fx_label)], axis=1).dropna(how="all")
     yield_curve_series = yields[yield_ids].dropna(how="all")
     rate_series = pd.concat([dgs2.rename("2Y"), dgs10.rename("10Y"), dgs30.rename("30Y"), curve_10y_3m, curve_10y_2y, curve_5y_2y, curve_30y_10y], axis=1).dropna(how="all")
-    risk_series = pd.concat([spx.rename("KRX"), drawdown, rolling_vol], axis=1).dropna(how="all")
-    stress_series = pd.concat([vix.rename("VIX"), ig_oas.rename("IG OAS"), hy_oas.rename("HY OAS"), baa_aaa_spread.rename("Baa-AAA")], axis=1).dropna(how="all")
+    risk_series = pd.concat([spx.rename(equity_label), drawdown, rolling_vol], axis=1).dropna(how="all")
+    stress_series = pd.concat([rolling_vol, drawdown, fx_vol, curve_10y_2y], axis=1).dropna(how="all")
 
     return MacroDashboard(
         as_of_date=as_of,
@@ -1377,5 +1659,5 @@ def build_macro_dashboard(
         yield_curve_series=yield_curve_series,
         risk_series=risk_series,
         stress_series=stress_series,
-        commodity_series=commodity_series,
+        commodity_series=domestic_series,
     )

@@ -17,6 +17,9 @@ if exist ".venv\Scripts\python.exe" (
 if "%FRED_API_KEY%"=="" (
   for /f "tokens=2,*" %%A in ('reg query HKCU\Environment /v FRED_API_KEY 2^>nul') do set "FRED_API_KEY=%%B"
 )
+if "%KOREA_ECOS_API_KEY%"=="" (
+  for /f "tokens=2,*" %%A in ('reg query HKCU\Environment /v KOREA_ECOS_API_KEY 2^>nul') do set "KOREA_ECOS_API_KEY=%%B"
+)
 
 echo.>>"%LOG_FILE%"
 echo ============================================================>>"%LOG_FILE%"
