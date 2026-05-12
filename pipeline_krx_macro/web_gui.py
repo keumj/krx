@@ -442,7 +442,8 @@ def _page_charts(page: str, dashboard: MacroDashboard) -> str:
                 ),
             ),
         ]
-    return '<div class="macro-grid two macro-chart-grid">' + "".join(_chart_card(title, image) for title, image in charts) + "</div>"
+    grid_class = "macro-grid macro-chart-grid" if page == "dollar" else "macro-grid two macro-chart-grid"
+    return f'<div class="{grid_class}">' + "".join(_chart_card(title, image) for title, image in charts) + "</div>"
 
 
 def _overview_page(dashboard: MacroDashboard) -> str:

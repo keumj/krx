@@ -19,6 +19,7 @@ from pipeline_common.shared_krx_prices_sql import (
     shared_prices_sqlite_path,
 )
 from pipeline_krx_stock_news.analysis import heuristic_title_sentiment
+from pipeline_krx_macro.macro_data_store import read_macro_series
 
 import matplotlib
 matplotlib.use("Agg")
@@ -94,6 +95,7 @@ class PortfolioDashboard:
     style_exposure_chart: str | None = None
     sector_allocation_chart: str | None = None
     benchmark_sector_allocation_chart: str | None = None
+    weekly_return_chart: str | None = None
     risk_contribution_chart: str | None = None
     active_risk_contribution_chart: str | None = None
     integrated_score_chart: str | None = None
@@ -940,6 +942,72 @@ def _build_cumulative_return_chart(portfolio_daily: pd.Series, benchmark_daily: 
     return _render_chart_base64(fig)
 
 
+def _weekly_return_series(daily: pd.Series, weeks: int = 26) -> pd.Series:
+    clean = pd.to_numeric(daily, errors="coerce").dropna().sort_index()
+    if clean.empty:
+        return pd.Series(dtype=float)
+    weekly = ((1.0 + clean).resample("W-FRI").prod() - 1.0) * 100.0
+    return weekly.dropna().tail(int(weeks))
+
+
+def _build_weekly_return_histogram(portfolio_daily: pd.Series, benchmark_daily: pd.Series, *, weeks: int = 26) -> str:
+    portfolio_weekly = _weekly_return_series(portfolio_daily, weeks=weeks).rename("Portfolio")
+    benchmark_weekly = _weekly_return_series(benchmark_daily, weeks=weeks).rename("KOSPI 200")
+    joined = pd.concat([portfolio_weekly, benchmark_weekly], axis=1).dropna(how="all").tail(int(weeks))
+    if joined.empty:
+        return ""
+
+    labels = [idx.strftime("%m-%d") for idx in joined.index]
+    x = np.arange(len(joined.index))
+    width = 0.42
+    fig, ax = plt.subplots(figsize=(10, 4))
+    ax.bar(x - width / 2, joined["Portfolio"].fillna(0.0), width, label="Portfolio", color="#0f4c81", alpha=0.85)
+    ax.bar(x + width / 2, joined["KOSPI 200"].fillna(0.0), width, label="KOSPI 200", color="#b26a00", alpha=0.65)
+    ax.axhline(0, color="#111827", linewidth=0.8)
+    ax.set_title(f"Weekly Returns: Portfolio vs KOSPI 200 ({weeks}W)", fontsize=12, pad=10)
+    ax.set_ylabel("Weekly return (%)")
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=7)
+    ax.legend(loc="upper left", frameon=False)
+    ax.grid(axis="y", alpha=0.2)
+    fig.tight_layout()
+    return _render_chart_base64(fig)
+
+
+def _kospi200_consistency_diagnostics(benchmark_daily: pd.Series, start_ts: pd.Timestamp, end_ts: pd.Timestamp) -> dict[str, str]:
+    macro_index, macro_source = read_macro_series("KOSPI200", start_date=start_ts.strftime("%Y-%m-%d"))
+    if macro_index is None or macro_index.empty or benchmark_daily.empty:
+        return {
+            "kospi200_consistency": "unavailable",
+            "kospi200_macro_source": macro_source or "missing",
+        }
+    macro_index = macro_index[(macro_index.index >= start_ts.normalize()) & (macro_index.index <= end_ts.normalize())]
+    macro_daily = macro_index.sort_index().pct_change(fill_method=None).dropna()
+    joined = pd.concat([benchmark_daily.rename("components"), macro_daily.rename("direct_index")], axis=1).dropna()
+    if len(joined) < 5:
+        return {
+            "kospi200_consistency": "insufficient_overlap",
+            "kospi200_macro_source": macro_source or "macro_sqlite:KOSPI200",
+        }
+    component_return = (1.0 + joined["components"]).prod() - 1.0
+    direct_return = (1.0 + joined["direct_index"]).prod() - 1.0
+    diff_bp = (component_return - direct_return) * 10000.0
+    corr = float(joined["components"].corr(joined["direct_index"]))
+    return {
+        "kospi200_consistency": f"overlap_days={len(joined)}, component_return={component_return * 100.0:.2f}%, direct_index_return={direct_return * 100.0:.2f}%, diff={diff_bp:.0f}bp, daily_corr={corr:.4f}",
+        "kospi200_macro_source": macro_source or "macro_sqlite:KOSPI200",
+    }
+
+
+def _direct_kospi200_daily_returns(start_ts: pd.Timestamp, end_ts: pd.Timestamp) -> tuple[pd.Series, str]:
+    macro_index, macro_source = read_macro_series("KOSPI200", start_date=start_ts.strftime("%Y-%m-%d"))
+    if macro_index is None or macro_index.empty:
+        return pd.Series(dtype=float), macro_source or "missing"
+    macro_index = macro_index[(macro_index.index >= start_ts.normalize()) & (macro_index.index <= end_ts.normalize())]
+    daily = macro_index.sort_index().pct_change(fill_method=None).dropna().rename("KOSPI200")
+    return daily, macro_source or "macro_sqlite:KOSPI200"
+
+
 def _build_sector_contribution_chart(attribution: pd.DataFrame) -> str:
     if attribution.empty or "sector" not in attribution.columns or "total_effect_pct" not in attribution.columns:
         return ""
@@ -1400,16 +1468,24 @@ def _portfolio_return_series(
 ) -> pd.Series:
     if close_history.empty or positions.empty:
         return pd.Series(dtype=float)
-    weights = _normalize_weights(positions.set_index("ticker")["market_value"])
+    pos = positions.copy()
+    pos["ticker"] = pos["ticker"].astype(str).str.upper()
+    quantities = pd.to_numeric(pos.set_index("ticker")["net_quantity"], errors="coerce").fillna(0.0)
     # 현금(CASH)을 제외한 주식 종목만 수익률 계산에 참여 (현금 수익률은 0이므로 가중치만 반영됨)
-    common = [ticker for ticker in weights.index if ticker in close_history.columns and ticker != "CASH"]
+    common = [ticker for ticker in quantities.index if ticker in close_history.columns and ticker != "CASH"]
     if not common:
-        return pd.Series(dtype=float)
+        cash_nav = float(quantities.get("CASH", 0.0))
+        if cash_nav == 0.0:
+            return pd.Series(dtype=float)
+        return pd.Series(0.0, index=close_history.index, name="portfolio_daily")
 
-    returns = close_history[common].sort_index().pct_change(fill_method=None)
-    weights = weights.reindex(common).fillna(0.0)
-    portfolio_daily = returns.mul(weights, axis=1).sum(axis=1, min_count=1)
-    return portfolio_daily.dropna()
+    stock_values = close_history[common].sort_index().ffill().mul(quantities.reindex(common), axis=1)
+    cash_value = float(quantities.get("CASH", 0.0))
+    nav = stock_values.sum(axis=1, min_count=1).add(cash_value, fill_value=0.0).dropna()
+    nav = nav[nav > 0]
+    if len(nav) < 2:
+        return pd.Series(dtype=float)
+    return nav.pct_change(fill_method=None).dropna().rename("portfolio_daily")
 
 
 def _benchmark_series(
@@ -2575,6 +2651,8 @@ def build_portfolio_dashboard(
         sector_frame=benchmark_sector_frame,
         benchmark_weights=explicit_benchmark_weights,
     )
+    direct_benchmark_daily, direct_benchmark_source = _direct_kospi200_daily_returns(start_ts, end_ts)
+    performance_benchmark_daily = direct_benchmark_daily if not direct_benchmark_daily.empty else benchmark_daily
     style_map, _, style_source = _build_style_map(universe, shared_db=shared_db, as_of_date=end_ts)
     positions["style_bucket"] = positions["ticker"].map(style_map).fillna("Unknown")
     holdings_performance["style_bucket"] = holdings_performance["ticker"].map(style_map).fillna("Unknown")
@@ -2588,7 +2666,7 @@ def build_portfolio_dashboard(
     )
     holding_returns = _holding_returns(close_history)
     risk_summary, risk_contribution, relative_risk_summary = _build_risk_summary(
-        positions, holding_returns, portfolio_daily, benchmark_daily
+        positions, holding_returns, portfolio_daily, performance_benchmark_daily
     )
     active_risk_contribution = _build_active_risk_contribution(
         positions,
@@ -2602,7 +2680,7 @@ def build_portfolio_dashboard(
         risk_contribution,
         active_risk_contribution,
         holding_returns,
-        benchmark_daily,
+        performance_benchmark_daily,
         sector_returns,
         style_map=style_map,
     )
@@ -2637,7 +2715,8 @@ def build_portfolio_dashboard(
         scoring["style_bucket"] = scoring["ticker"].map(style_map).fillna("Unknown")
 
     # 시각화 차트 생성
-    cum_chart = _build_cumulative_return_chart(portfolio_daily, benchmark_daily)
+    cum_chart = _build_cumulative_return_chart(portfolio_daily, performance_benchmark_daily)
+    weekly_chart = _build_weekly_return_histogram(portfolio_daily, performance_benchmark_daily, weeks=26)
     sector_chart = _build_sector_contribution_chart(attribution)
     style_chart = _build_style_exposure_chart(style_exposure)
 
@@ -2661,7 +2740,7 @@ def build_portfolio_dashboard(
         positions, 
         holdings_performance, 
         portfolio_daily, 
-        benchmark_daily, 
+        performance_benchmark_daily, 
         as_of_date=as_of_date,
         start_ts=start_ts,
         end_ts=end_ts
@@ -2673,10 +2752,13 @@ def build_portfolio_dashboard(
         "benchmark_component_source": benchmark_component_source,
         "price_source": position_sources.get("price_source", "sqlite"),
         "benchmark_price_source": benchmark_sources.get("price_source", "sqlite"),
+        "performance_benchmark_source": direct_benchmark_source if not direct_benchmark_daily.empty else benchmark_sources.get("price_source", "sqlite"),
         "financial_metric_source": financial_source,
         "style_source": style_source,
         "cash_warning": cash_warning,
+        "portfolio_return_basis": "NAV: sum(shares * close) + CASH; daily returns are NAV.pct_change()",
     }
+    diagnostics.update(_kospi200_consistency_diagnostics(benchmark_daily, start_ts, end_ts))
     return PortfolioDashboard(
         as_of_date=as_of_date,
         trades=trades,
@@ -2694,6 +2776,7 @@ def build_portfolio_dashboard(
         style_exposure=style_exposure,
         scoring=scoring,
         cumulative_chart=cum_chart,
+        weekly_return_chart=weekly_chart,
         sector_contribution_chart=sector_chart,
         style_exposure_chart=style_chart,
         sector_allocation_chart=alloc_chart,

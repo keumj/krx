@@ -618,9 +618,15 @@ def _attribution_page(ctx: _PageContext) -> str:
     body = f"""
     {_message_block(ctx)}
     {_date_range_form("attribution", ctx)}
-    <div class="card" style="margin-bottom: 12px;">
+    <div class="grid-2" style="margin-bottom: 12px;">
+      <div class="card">
       <h3>누적 수익률 추이 (vs KOSPI200)</h3>
       {f'<img src="data:image/png;base64,{dashboard.cumulative_chart}" class="chart-img" />' if dashboard and dashboard.cumulative_chart else "<p class='hint'>차트 데이터를 불러올 수 없습니다.</p>"}
+      </div>
+      <div class="card">
+        <h3>주간 수익률 26주 (vs KOSPI200)</h3>
+        {f'<img src="data:image/png;base64,{dashboard.weekly_return_chart}" class="chart-img" />' if dashboard and dashboard.weekly_return_chart else "<p class='hint'>차트 데이터를 불러올 수 없습니다.</p>"}
+      </div>
     </div>
     <div class="grid-2" style="margin-bottom: 12px;">
        <div class="card">
