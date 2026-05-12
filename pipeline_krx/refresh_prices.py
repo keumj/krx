@@ -116,7 +116,7 @@ def _column_name(frame: pd.DataFrame, *candidates: str) -> str | None:
     return None
 
 
-def _load_components(path: Path) -> pd.DataFrame:
+def _read_components_csv(path: Path) -> pd.DataFrame:
     frame = pd.read_csv(path)
     if frame.empty:
         raise RuntimeError(f"KRX components CSV is empty: {path}")
@@ -133,6 +133,60 @@ def _load_components(path: Path) -> pd.DataFrame:
     return out
 
 
+def _load_components_from_sqlite(db_path: Path) -> pd.DataFrame:
+    if not db_path.exists():
+        return pd.DataFrame()
+    with sqlite3.connect(db_path) as conn:
+        frame = pd.read_sql_query(
+            """
+            SELECT
+                symbol AS Symbol,
+                market AS Market,
+                name_kr AS NameKR,
+                name_en AS NameEN,
+                sector AS Sector,
+                industry AS Industry,
+                listing_date AS ListingDate,
+                reference_source AS ReferenceSource
+            FROM securities
+            WHERE COALESCE(is_active, 1) = 1
+              AND symbol IS NOT NULL
+            ORDER BY
+                CASE market WHEN 'KOSPI' THEN 0 WHEN 'KOSDAQ' THEN 1 WHEN 'KONEX' THEN 2 ELSE 3 END,
+                symbol
+            """,
+            conn,
+        )
+    if frame.empty:
+        return frame
+    frame["Symbol"] = frame["Symbol"].map(_normalize_symbol)
+    frame["Market"] = frame["Market"].astype(str).str.strip().str.upper().replace({"": "UNKNOWN", "NONE": "UNKNOWN", "NAN": "UNKNOWN"})
+    frame["SharesOutstanding"] = None
+    return frame
+
+
+def _load_components(path: Path, *, db_path: Path | None = None) -> pd.DataFrame:
+    if db_path is not None:
+        from_db = _load_components_from_sqlite(db_path)
+        if not from_db.empty:
+            _log(f"components source: sqlite:{db_path}:securities rows={len(from_db.index)}")
+            return from_db
+
+    candidates = [path]
+    for fallback in [Path("data/krx_components.csv"), Path("data/krx_kospi200_latest.csv")]:
+        if fallback not in candidates:
+            candidates.append(fallback)
+    for candidate in candidates:
+        if candidate.exists() and candidate.is_file():
+            _log(f"components source: csv:{candidate}")
+            return _read_components_csv(candidate)
+
+    raise FileNotFoundError(
+        f"KRX components are missing from shared SQLite and no bootstrap CSV was found: {path}. "
+        "Run `python -m pipeline_krx.components --db-path <shared_db>` to seed securities."
+    )
+
+
 def _standardize_price_frame(raw: pd.DataFrame, *, symbol: str, shares_outstanding: float | None) -> pd.DataFrame:
     if raw is None or raw.empty:
         return pd.DataFrame()
@@ -143,6 +197,7 @@ def _standardize_price_frame(raw: pd.DataFrame, *, symbol: str, shares_outstandi
     close_col = _column_name(raw, "close", "종가")
     volume_col = _column_name(raw, "volume", "거래량")
     value_col = _column_name(raw, "amount", "tradingvalue", "trade value", "거래대금")
+    market_cap_col = _column_name(raw, "marcap", "marketcap", "market_cap", "시가총액")
     if None in {open_col, high_col, low_col, close_col}:
         return pd.DataFrame()
 
@@ -155,8 +210,14 @@ def _standardize_price_frame(raw: pd.DataFrame, *, symbol: str, shares_outstandi
     out["close"] = pd.to_numeric(raw[close_col], errors="coerce")
     out["volume"] = pd.to_numeric(raw[volume_col], errors="coerce").fillna(0.0) if volume_col else 0.0
     out["trading_value"] = pd.to_numeric(raw[value_col], errors="coerce") if value_col else None
-    out["shares_outstanding"] = float(shares_outstanding) if shares_outstanding is not None else None
-    out["market_cap"] = out["close"] * float(shares_outstanding) if shares_outstanding is not None else None
+    market_cap = pd.to_numeric(raw[market_cap_col], errors="coerce") if market_cap_col else None
+    out["market_cap"] = market_cap if market_cap is not None else (out["close"] * float(shares_outstanding) if shares_outstanding is not None else None)
+    if shares_outstanding is not None:
+        out["shares_outstanding"] = float(shares_outstanding)
+    elif market_cap is not None:
+        out["shares_outstanding"] = out["market_cap"] / out["close"].replace(0.0, pd.NA)
+    else:
+        out["shares_outstanding"] = None
     out["foreign_ownership_pct"] = None
     out["adj_close"] = out["close"]
     out["dividends"] = 0.0
@@ -262,7 +323,7 @@ def refresh_krx_prices(
 
     configure_ssl(insecure_ssl=insecure_ssl, ca_bundle=ca_bundle)
     sqlite_result = init_krx_project_db(db_path=Path(db_path) if db_path is not None else None)
-    components = _load_components(components_csv)
+    components = _load_components(components_csv, db_path=sqlite_result.db_path)
     upsert_krx_securities(
         components.rename(
             columns={

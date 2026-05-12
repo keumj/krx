@@ -315,8 +315,9 @@ def _hero(dashboard: MacroDashboard, description: str) -> str:
     """
 
 
-def _chart_card(title: str, image: str) -> str:
-    return f'<section class="service-card macro-chart-card"><h2>{html.escape(title)}</h2><img src="data:image/png;base64,{image}" alt="{html.escape(title)} chart" /></section>'
+def _chart_card(title: str, image: str, *, stacked: bool = False) -> str:
+    extra_class = " macro-chart-card-stacked" if stacked else ""
+    return f'<section class="service-card macro-chart-card{extra_class}"><h2>{html.escape(title)}</h2><img src="data:image/png;base64,{image}" alt="{html.escape(title)} chart" /></section>'
 
 
 def _equity_column(dashboard: MacroDashboard) -> str:
@@ -424,7 +425,7 @@ def _page_charts(page: str, dashboard: MacroDashboard) -> str:
         returns_60d = [_return_since_days(domestic[c], 60) for c in columns]
         charts = [
             ("환율과 국내 비용/활동 지표", _multi_panel_line_chart(domestic[[fx_col, *columns]], f"{fx_col} and Korea Macro Levels")),
-            ("국내 비용/활동 60D 변화율", _bar_chart([str(c) for c in columns], returns_60d, "Korea Macro 60D Changes", ylabel="%")),
+            ("국내 비용/활동 60D 변화율", _horizontal_bar_chart([str(c) for c in columns], returns_60d, "Korea Macro 60D Changes", xlabel="%")),
         ]
     else:
         playbook = dashboard.sector_playbook
@@ -442,8 +443,7 @@ def _page_charts(page: str, dashboard: MacroDashboard) -> str:
                 ),
             ),
         ]
-    grid_class = "macro-grid macro-chart-grid" if page == "dollar" else "macro-grid two macro-chart-grid"
-    return f'<div class="{grid_class}">' + "".join(_chart_card(title, image) for title, image in charts) + "</div>"
+    return '<div class="macro-grid two macro-chart-grid">' + "".join(_chart_card(title, image) for title, image in charts) + "</div>"
 
 
 def _overview_page(dashboard: MacroDashboard) -> str:

@@ -24,7 +24,6 @@ echo ============================================================
 echo  Keumj local data refresh
 echo ============================================================
 echo  This updates local data files only.
-echo  After refresh, commit and push the changed Git LFS data files.
 echo.
 echo  Python: %PYTHON_EXE%
 echo.
@@ -88,7 +87,7 @@ call :show_latest news
 goto :status
 
 :macro
-call :run_module_args pipeline_krx_macro.refresh_macro_prices --years 10 --daily-core --require-ecos
+call :run_module pipeline_krx_macro.refresh_macro_prices --years 10 --daily-core --require-ecos
 if errorlevel 1 (
   set "EXIT_CODE=%ERRORLEVEL%"
   goto :status
@@ -116,7 +115,7 @@ if errorlevel 1 (
   goto :status
 )
 call :show_latest news
-call :run_module_args pipeline_krx_macro.refresh_macro_prices --years 10 --daily-core --require-ecos
+call :run_module pipeline_krx_macro.refresh_macro_prices --years 10 --daily-core --require-ecos
 if errorlevel 1 (
   set "EXIT_CODE=%ERRORLEVEL%"
   goto :status
@@ -126,14 +125,6 @@ set "REFRESH_OK=1"
 goto :status
 
 :run_module
-echo.
-echo ------------------------------------------------------------
-echo Running: %~1
-echo ------------------------------------------------------------
-"%PYTHON_EXE%" -u -m %~1
-exit /b %ERRORLEVEL%
-
-:run_module_args
 echo.
 echo ------------------------------------------------------------
 echo Running: %*
@@ -152,25 +143,13 @@ exit /b 0
 :status
 echo.
 echo ============================================================
-echo  Refresh finished. Changed files:
+echo  Refresh finished.
 echo ============================================================
 if "%REFRESH_OK%"=="1" (
   echo  Refresh result: SUCCESS
 ) else (
   echo  Refresh result: FAILED ^(exit_code=%EXIT_CODE%^)
 )
-echo.
-git status --short data
-echo.
-echo Git LFS tracked data files:
-git lfs ls-files
-echo.
-echo GitHub auto sync is disabled. Review changed SQLite files and push manually if needed.
-echo.
-echo Suggested next steps:
-echo   git add data
-echo   git commit -m "Refresh KRX market data"
-echo   git push
 echo.
 
 :done
