@@ -84,6 +84,9 @@ def run(page: str, form: dict[str, str], *, session_key: str = "global") -> str:
     page_form = news_web._default_form()
     page_form.update({key: str(value).strip() for key, value in form.items()})
     page_form["ticker"] = page_form.get("ticker", "").strip().upper()
+    if str(page_form.get("keyword_preset", "")).strip() not in {*news_web.KEYWORD_PRESETS.keys(), "custom"}:
+        page_form["keyword_preset"] = "custom"
+    page_form["event_keywords"] = news_web._keywords_from_form(page_form)
     state.form = page_form
     try:
         state.dashboard = news_web._build_dashboard_from_form(page_form, page_key)

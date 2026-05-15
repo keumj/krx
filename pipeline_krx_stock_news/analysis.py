@@ -16,6 +16,13 @@ from pipeline_common.shared_krx_prices_sql import shared_prices_sqlite_path
 
 DEFAULT_LOOKBACK_DAYS = 45
 DEFAULT_EVENT_KEYWORDS = "실적,영업이익,매출,수주,계약,공시,전망,흑자,적자,승인"
+KEYWORD_PRESETS: dict[str, tuple[str, str]] = {
+    "earnings": ("실적/재무", "실적,영업이익,매출,순이익,흑자,적자,전망"),
+    "orders": ("수주/계약", "수주,계약,공급계약,납품,입찰,선정,승인"),
+    "disclosure": ("공시/IR", "공시,잠정,실적발표,주주총회,배당,자사주,유상증자,무상증자"),
+    "momentum": ("주가/모멘텀", "급등,상승,강세,신고가,목표가,상향,하락,급락,약세,하향"),
+    "risk": ("리스크/악재", "적자,손실,감소,부진,소송,조사,리콜,중단,연기,제재"),
+}
 DEFAULT_EVENT_HORIZON_DAYS = 5
 DEFAULT_DIVERGENCE_TOP_N = 20
 DEFAULT_TOPIC_COUNT = 5
@@ -73,6 +80,63 @@ NEGATIVE_TITLE_WORDS = {
     "risk",
     "warning",
     "weak",
+}
+KOREAN_POSITIVE_TITLE_PHRASES: dict[str, float] = {
+    "호실적": 2.0,
+    "어닝서프라이즈": 2.0,
+    "영업이익 증가": 1.5,
+    "영업익 증가": 1.5,
+    "영업이익 급증": 2.0,
+    "영업익 급증": 2.0,
+    "매출 증가": 1.0,
+    "순이익 증가": 1.5,
+    "흑자전환": 2.0,
+    "흑자 전환": 2.0,
+    "흑자": 1.0,
+    "수주": 1.2,
+    "계약 체결": 1.5,
+    "공급계약": 1.5,
+    "납품": 1.0,
+    "선정": 1.0,
+    "승인": 1.0,
+    "상향": 1.2,
+    "목표가 상향": 1.8,
+    "강세": 1.0,
+    "상승": 1.0,
+    "급등": 1.5,
+    "신고가": 1.5,
+    "최대 실적": 2.0,
+    "사상 최대": 2.0,
+    "배당": 0.8,
+    "자사주": 0.8,
+}
+KOREAN_NEGATIVE_TITLE_PHRASES: dict[str, float] = {
+    "어닝쇼크": 2.0,
+    "영업이익 감소": 1.5,
+    "영업익 감소": 1.5,
+    "영업손실": 2.0,
+    "매출 감소": 1.0,
+    "순손실": 1.5,
+    "적자전환": 2.0,
+    "적자 전환": 2.0,
+    "적자": 1.2,
+    "손실": 1.0,
+    "부진": 1.2,
+    "하향": 1.2,
+    "목표가 하향": 1.8,
+    "약세": 1.0,
+    "하락": 1.0,
+    "급락": 1.5,
+    "신저가": 1.5,
+    "소송": 1.5,
+    "조사": 1.0,
+    "압수수색": 2.0,
+    "리콜": 1.5,
+    "중단": 1.2,
+    "연기": 1.0,
+    "제재": 1.5,
+    "불확실": 1.0,
+    "경고": 1.0,
 }
 TOPIC_STOP_WORDS = {
     "stock",
@@ -483,9 +547,13 @@ def _precompute_forward_return_frames(
 
 
 def heuristic_title_sentiment(title: str) -> float:
-    tokens = set(re.findall(r"[a-zA-Z][a-zA-Z0-9'-]+", str(title or "").lower()))
+    raw_title = str(title or "")
+    lowered = raw_title.lower()
+    tokens = set(re.findall(r"[a-zA-Z][a-zA-Z0-9'-]+", lowered))
     positive = sum(1 for token in tokens if token in POSITIVE_TITLE_WORDS)
     negative = sum(1 for token in tokens if token in NEGATIVE_TITLE_WORDS)
+    positive += sum(score for phrase, score in KOREAN_POSITIVE_TITLE_PHRASES.items() if phrase in raw_title)
+    negative += sum(score for phrase, score in KOREAN_NEGATIVE_TITLE_PHRASES.items() if phrase in raw_title)
     return float(positive - negative)
 
 

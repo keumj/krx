@@ -34,6 +34,7 @@ from .analysis import (
     DEFAULT_EVENT_KEYWORDS,
     DEFAULT_LOOKBACK_DAYS,
     DEFAULT_TOPIC_COUNT,
+    KEYWORD_PRESETS,
     StockNewsDashboard,
     build_stock_news_dashboard,
 )
@@ -64,6 +65,7 @@ PAGE_TO_SECTIONS: dict[str, frozenset[str]] = {
 
 def _default_form() -> dict[str, str]:
     return {
+        "keyword_preset": "earnings",
         "event_keywords": DEFAULT_EVENT_KEYWORDS,
         "ticker": "",
         "lookback_days": str(DEFAULT_LOOKBACK_DAYS),
@@ -166,7 +168,7 @@ def _base_css() -> str:
     .nav a.refresh.active { background: #111; color: #fff; border-color: #111; }
     .form-grid { display: grid; grid-template-columns: repeat(6, minmax(150px, 1fr)); gap: 10px 12px; }
     .form-grid label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
-    .form-grid input[type="text"], .form-grid input[type="number"] {
+    .form-grid input[type="text"], .form-grid input[type="number"], .form-grid select {
       width: 100%; box-sizing: border-box; padding: 8px; border: 1px solid var(--line); border-radius: 6px;
     }
     .row { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; margin-top: 10px; }
@@ -639,11 +641,25 @@ def _page_key_from_path(path: str) -> str:
     }.get(path, "overview")
 
 
+def _keyword_preset_options(form: dict[str, str]) -> str:
+    selected = str(form.get("keyword_preset", "earnings") or "earnings").strip()
+    options: list[str] = []
+    for key, (label, keywords) in KEYWORD_PRESETS.items():
+        attrs = f' value="{html.escape(key)}" data-keywords="{html.escape(keywords)}"'
+        if key == selected:
+            attrs += " selected"
+        options.append(f"<option{attrs}>{html.escape(label)}</option>")
+    custom_selected = " selected" if selected == "custom" else ""
+    options.append(f'<option value="custom" data-keywords=""{custom_selected}>직접 입력</option>')
+    return "".join(options)
+
+
 def _shared_form(form: dict[str, str], *, action: str, button_label: str) -> str:
     return f"""
     <form class="card" method="post" action="{action}">
       <div class="form-grid">
-        <div><label>키워드</label><input type="text" name="event_keywords" value="{html.escape(form.get('event_keywords', ''))}" /></div>
+        <div><label>키워드 프리셋</label><select name="keyword_preset" data-keyword-preset>{_keyword_preset_options(form)}</select></div>
+        <div><label>키워드</label><input type="text" name="event_keywords" value="{html.escape(form.get('event_keywords', ''))}" data-keyword-input /></div>
         <div><label>티커</label><input type="text" name="ticker" value="{html.escape(form.get('ticker', ''))}" placeholder="005930" /></div>
         <div><label>조회 일수</label><input type="number" min="7" max="365" name="lookback_days" value="{html.escape(form.get('lookback_days', ''))}" /></div>
         <div><label>이벤트 평가일</label><input type="number" min="1" max="20" name="horizon_days" value="{html.escape(form.get('horizon_days', ''))}" /></div>
@@ -654,8 +670,33 @@ def _shared_form(form: dict[str, str], *, action: str, button_label: str) -> str
         <button type="submit" name="intent" value="run">{html.escape(button_label)}</button>
         <button type="submit" name="intent" value="resolve_ticker">회사이름으로 티커 찾기</button>
       </div>
+      <script>
+        (() => {{
+          const form = document.currentScript.closest("form");
+          if (!form) return;
+          const preset = form.querySelector("[data-keyword-preset]");
+          const input = form.querySelector("[data-keyword-input]");
+          if (!preset || !input) return;
+          preset.addEventListener("change", () => {{
+            const option = preset.options[preset.selectedIndex];
+            const keywords = option ? option.getAttribute("data-keywords") || "" : "";
+            if (preset.value !== "custom") input.value = keywords;
+          }});
+          input.addEventListener("input", () => {{
+            preset.value = "custom";
+          }});
+        }})();
+      </script>
     </form>
     """
+
+
+def _keywords_from_form(form: dict[str, str]) -> str:
+    preset = str(form.get("keyword_preset", "") or "").strip()
+    typed = str(form.get("event_keywords", "") or "").strip()
+    if preset and preset != "custom" and preset in KEYWORD_PRESETS:
+        return KEYWORD_PRESETS[preset][1]
+    return typed or DEFAULT_EVENT_KEYWORDS
 
 
 def _layout_page(
@@ -923,6 +964,9 @@ def _parse_form(body: bytes) -> dict[str, str]:
             form[key] = str(parsed[key][0]).strip()
     if "intent" in parsed and parsed["intent"]:
         form["intent"] = str(parsed["intent"][0]).strip()
+    if str(form.get("keyword_preset", "")).strip() not in {*KEYWORD_PRESETS.keys(), "custom"}:
+        form["keyword_preset"] = "custom"
+    form["event_keywords"] = _keywords_from_form(form)
     return form
 
 
@@ -1218,7 +1262,7 @@ def _html_refresh_history_page() -> str:
 def _build_dashboard_from_form(form: dict[str, str], page_key: str) -> StockNewsDashboard:
     ticker = form.get("ticker", "").strip().upper() or None
     return build_stock_news_dashboard(
-        event_keywords=form.get("event_keywords", DEFAULT_EVENT_KEYWORDS),
+        event_keywords=_keywords_from_form(form),
         ticker=ticker,
         lookback_days=max(int(form.get("lookback_days", DEFAULT_LOOKBACK_DAYS) or DEFAULT_LOOKBACK_DAYS), 1),
         horizon_days=max(int(form.get("horizon_days", DEFAULT_EVENT_HORIZON_DAYS) or DEFAULT_EVENT_HORIZON_DAYS), 1),
