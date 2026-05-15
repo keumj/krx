@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 import argparse
+import os
 import signal
 import sqlite3
 import sys
+import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
 
-from pipeline_common.news_data import NewsArticle, fetch_google_news_articles
+from pipeline_common.news_data import NewsArticle, fetch_google_news_articles, fetch_naver_news_articles
 from pipeline_common.security import configure_ssl, security_hint
 
 from .db import init_krx_project_db, krx_prices_sqlite_path
@@ -21,6 +23,7 @@ DEFAULT_BACKFILL_DAYS = 32
 DEFAULT_INCREMENTAL_OVERLAP_DAYS = 2
 DEFAULT_MAX_ITEMS = 30
 DEFAULT_PROGRESS_BATCH_SIZE = 200
+DEFAULT_NEWS_PROVIDER = "google"
 _CANCEL_REQUESTED = False
 
 
@@ -118,6 +121,39 @@ def _load_krx_news_targets(components_csv: Path) -> list[dict[str, str]]:
     return targets
 
 
+def _filter_targets_by_existing_news_count(
+    conn: sqlite3.Connection,
+    targets: list[dict[str, str]],
+    *,
+    start_date: date,
+    as_of_date: date,
+    max_existing_articles: int,
+) -> list[dict[str, str]]:
+    threshold = max(int(max_existing_articles), 0)
+    if threshold <= 0 or not targets:
+        return targets
+    symbols = [str(item.get("symbol") or "").strip().upper() for item in targets if str(item.get("symbol") or "").strip()]
+    if not symbols:
+        return []
+    counts: dict[str, int] = {}
+    chunk_size = 900
+    for offset in range(0, len(symbols), chunk_size):
+        chunk = symbols[offset : offset + chunk_size]
+        placeholders = ",".join(["?"] * len(chunk))
+        rows = conn.execute(
+            f"""
+            SELECT symbol, COUNT(*)
+            FROM news_articles
+            WHERE date(publish_date) BETWEEN ? AND ?
+              AND symbol IN ({placeholders})
+            GROUP BY symbol
+            """,
+            (start_date.isoformat(), as_of_date.isoformat(), *chunk),
+        ).fetchall()
+        counts.update({str(symbol): int(count) for symbol, count in rows})
+    return [item for item in targets if counts.get(str(item.get("symbol") or "").strip().upper(), 0) < threshold]
+
+
 def _coerce_date(value: str | date | datetime | None, *, fallback: date) -> date:
     if value is None:
         return fallback
@@ -155,10 +191,10 @@ def _article_query_for_target(target: dict[str, str]) -> str:
     name_kr = str(target.get("name_kr") or "").strip()
     name_en = str(target.get("name_en") or "").strip()
     if name_kr:
-        return f'"{name_kr}" 주가'
+        return f'"{name_kr}" 주식'
     if name_en:
         return f'"{name_en}" stock'
-    return f'"{target["symbol"]}" 주가'
+    return f'"{target["symbol"]}" 주식'
 
 
 def _publish_date_text(value: datetime) -> str:
@@ -211,6 +247,14 @@ def sync_krx_news_articles(
     timeout: int = 8,
     components_csv: Path | str = DEFAULT_COMPONENTS_CSV,
     db_path: Path | str | None = None,
+    provider: str = DEFAULT_NEWS_PROVIDER,
+    naver_client_id: str | None = None,
+    naver_client_secret: str | None = None,
+    request_delay: float = 0.0,
+    google_hl: str = "en-US",
+    google_gl: str = "US",
+    google_ceid: str = "US:en",
+    max_existing_articles: int = 0,
 ) -> KRXNewsSyncResult:
     today = datetime.now().date()
     run_date = _coerce_date(as_of_date, fallback=today)
@@ -223,6 +267,15 @@ def sync_krx_news_articles(
     skipped_duplicates = 0
     fetch_failures = 0
     sample_errors: list[str] = []
+    provider_name = str(provider or DEFAULT_NEWS_PROVIDER).strip().lower()
+    if provider_name not in {"google", "naver"}:
+        raise ValueError("provider must be one of: google, naver")
+    naver_id = str(naver_client_id or os.getenv("NAVER_NEWS_CLIENT_ID") or os.getenv("NAVER_CLIENT_ID") or "").strip()
+    naver_secret = str(
+        naver_client_secret or os.getenv("NAVER_NEWS_CLIENT_SECRET") or os.getenv("NAVER_CLIENT_SECRET") or ""
+    ).strip()
+    if provider_name == "naver" and (not naver_id or not naver_secret):
+        raise ValueError("Naver provider requires NAVER_NEWS_CLIENT_ID and NAVER_NEWS_CLIENT_SECRET")
 
     with sqlite3.connect(target) as conn:
         explicit_start_date = _coerce_date(start_date, fallback=run_date) if start_date is not None else None
@@ -234,9 +287,22 @@ def sync_krx_news_articles(
         )
         if effective_start_date > run_date:
             effective_start_date = run_date
+        if max_existing_articles > 0:
+            before_count = len(targets)
+            targets = _filter_targets_by_existing_news_count(
+                conn,
+                targets,
+                start_date=effective_start_date,
+                as_of_date=run_date,
+                max_existing_articles=max_existing_articles,
+            )
+            _log(
+                f"Filtered low-coverage targets: before={before_count}, after={len(targets)}, "
+                f"max_existing_articles={int(max_existing_articles)}"
+            )
         _log(
             f"Starting KRX news sync: symbols={len(targets)}, as_of_date={run_date.isoformat()}, "
-            f"start_date={effective_start_date.isoformat()}, max_items={max_items}"
+            f"start_date={effective_start_date.isoformat()}, max_items={max_items}, provider={provider_name}"
         )
         total_symbols = len(targets)
         batch_size = DEFAULT_PROGRESS_BATCH_SIZE
@@ -261,13 +327,33 @@ def sync_krx_news_articles(
                 )
             provider_query = _article_query_for_target(item)
             try:
-                articles = fetch_google_news_articles(query=provider_query, max_items=max_items, timeout=timeout)
+                if provider_name == "naver":
+                    articles = fetch_naver_news_articles(
+                        query=provider_query,
+                        client_id=naver_id,
+                        client_secret=naver_secret,
+                        max_items=max_items,
+                        timeout=timeout,
+                    )
+                else:
+                    articles = fetch_google_news_articles(
+                        query=provider_query,
+                        max_items=max_items,
+                        timeout=timeout,
+                        hl=google_hl,
+                        gl=google_gl,
+                        ceid=google_ceid,
+                    )
             except Exception as exc:
                 fetch_failures += 1
                 batch_fetch_failures += 1
                 if len(sample_errors) < 5:
                     sample_errors.append(f"{item['symbol']}: {type(exc).__name__}: {exc}")
                 articles = []
+            finally:
+                if request_delay > 0:
+                    time.sleep(float(request_delay))
+            if not articles:
                 continue
             window_matches = 0
             batch_articles_seen += len(articles)
@@ -341,6 +427,19 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--timeout", type=int, default=8, help="HTTP timeout in seconds.")
     parser.add_argument("--components-csv", default=str(DEFAULT_COMPONENTS_CSV), help="Path to KRX components CSV.")
     parser.add_argument("--db-path", default=None, help="Optional SQLite path override.")
+    parser.add_argument("--provider", choices=["google", "naver"], default=DEFAULT_NEWS_PROVIDER, help="News search provider.")
+    parser.add_argument("--naver-client-id", default="", help="Naver Search API client ID. Defaults to NAVER_NEWS_CLIENT_ID.")
+    parser.add_argument("--naver-client-secret", default="", help="Naver Search API client secret. Defaults to NAVER_NEWS_CLIENT_SECRET.")
+    parser.add_argument("--request-delay", type=float, default=0.0, help="Seconds to wait after each provider request.")
+    parser.add_argument("--google-hl", default="en-US", help="Google News RSS hl parameter.")
+    parser.add_argument("--google-gl", default="US", help="Google News RSS gl parameter.")
+    parser.add_argument("--google-ceid", default="US:en", help="Google News RSS ceid parameter.")
+    parser.add_argument(
+        "--max-existing-articles",
+        type=int,
+        default=0,
+        help="Only fetch symbols with fewer than this many existing news rows in the requested window.",
+    )
     parser.add_argument("--insecure-ssl", action="store_true", help="Disable TLS verification for temporary testing")
     parser.add_argument("--ca-bundle", default="", help="Custom CA bundle path")
     return parser
@@ -364,6 +463,14 @@ def main(argv: list[str] | None = None) -> int:
             timeout=args.timeout,
             components_csv=args.components_csv,
             db_path=args.db_path,
+            provider=args.provider,
+            naver_client_id=args.naver_client_id,
+            naver_client_secret=args.naver_client_secret,
+            request_delay=max(float(args.request_delay), 0.0),
+            google_hl=str(args.google_hl or "en-US"),
+            google_gl=str(args.google_gl or "US"),
+            google_ceid=str(args.google_ceid or "US:en"),
+            max_existing_articles=max(int(args.max_existing_articles), 0),
         )
     except KeyboardInterrupt:
         _log("Cancelled by user (Ctrl+C).")

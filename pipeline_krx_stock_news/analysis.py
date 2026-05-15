@@ -15,7 +15,7 @@ from sklearn.feature_extraction.text import CountVectorizer
 from pipeline_common.shared_krx_prices_sql import shared_prices_sqlite_path
 
 DEFAULT_LOOKBACK_DAYS = 45
-DEFAULT_EVENT_KEYWORDS = "earnings"
+DEFAULT_EVENT_KEYWORDS = "실적,영업이익,매출,수주,계약,공시,전망,흑자,적자,승인"
 DEFAULT_EVENT_HORIZON_DAYS = 5
 DEFAULT_DIVERGENCE_TOP_N = 20
 DEFAULT_TOPIC_COUNT = 5
