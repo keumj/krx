@@ -29,6 +29,7 @@ from pipeline_common.notebook_data import fetch_krx_close_prices
 from pipeline_common.security import configure_ssl, ensure_writable_dir, security_hint
 from pipeline_common.shared_krx_prices_sql import (
     load_shared_close_prices_for_symbols,
+    load_shared_krx_fs_rows_for_symbol,
     load_shared_market_caps_for_symbols,
     load_shared_quarterly_fundamentals_for_symbols,
     shared_prices_sqlite_path,
@@ -71,6 +72,7 @@ class _FinancialContext:
     income_table: pd.DataFrame
     balance_table: pd.DataFrame
     cashflow_table: pd.DataFrame
+    raw_fs_table: pd.DataFrame
     saved_dir: str | None
     source_table: pd.DataFrame
     provider_status_table: pd.DataFrame
@@ -2234,6 +2236,7 @@ def _build_financial_provider_status_table(
     *,
     krx_security_master: str,
     krx_quarterly_fundamentals: str,
+    krx_fs_rows: str,
     price_history: str,
     market_cap_history: str,
     external_provider: str,
@@ -2243,6 +2246,7 @@ def _build_financial_provider_status_table(
         [
             ("krx_security_master", krx_security_master),
             ("krx_quarterly_fundamentals", krx_quarterly_fundamentals),
+            ("krx_fs_rows", krx_fs_rows),
             ("price_history", price_history),
             ("market_cap_history", market_cap_history),
             ("external_provider", external_provider),
@@ -3370,6 +3374,71 @@ def _krx_company_name(ticker: str) -> str:
     return str(row[0] or row[1] or ticker)
 
 
+def _security_name_root(value: object) -> str:
+    text = str(value or "").strip()
+    text = re.sub(r"\s+", "", text)
+    text = re.sub(r"(우|우B|우C|1우|2우|3우|우선주|전환|종류)$", "", text)
+    return text
+
+
+def _resolve_financial_statement_symbol(ticker: str) -> tuple[str, str | None]:
+    requested = str(ticker or "").strip().upper()
+    if not requested:
+        return requested, None
+    target = shared_prices_sqlite_path()
+    if not target.exists():
+        return requested, None
+    try:
+        with sqlite3.connect(target) as conn:
+            row = conn.execute(
+                "SELECT symbol, COALESCE(name_kr, ''), corp_code FROM securities WHERE symbol = ?",
+                (requested,),
+            ).fetchone()
+            if row is None:
+                return requested, None
+            symbol, name_kr, corp_code = row
+            symbol = str(symbol or requested).strip().upper()
+            if str(corp_code or "").strip():
+                return symbol, None
+
+            if len(symbol) == 6 and not symbol.endswith("0"):
+                code_family_common = f"{symbol[:5]}0"
+                family = conn.execute(
+                    "SELECT symbol, COALESCE(name_kr, ''), corp_code FROM securities WHERE symbol = ?",
+                    (code_family_common,),
+                ).fetchone()
+                if family is not None and str(family[2] or "").strip():
+                    representative_symbol = str(family[0]).strip().upper()
+                    representative_name = str(family[1] or representative_symbol)
+                    return representative_symbol, f"financial_statement_symbol:{requested}->{representative_symbol} ({representative_name})"
+
+            root = _security_name_root(name_kr)
+            if not root:
+                return symbol, None
+            candidate = conn.execute(
+                """
+                SELECT symbol, COALESCE(name_kr, '')
+                FROM securities
+                WHERE COALESCE(corp_code, '') <> ''
+                  AND REPLACE(COALESCE(name_kr, ''), ' ', '') = ?
+                ORDER BY
+                  CASE WHEN symbol GLOB '[0-9][0-9][0-9][0-9][0-9]0' THEN 0 ELSE 1 END,
+                  symbol
+                LIMIT 1
+                """,
+                (root,),
+            ).fetchone()
+    except Exception:
+        return requested, None
+    if candidate is None:
+        return requested, None
+    representative_symbol = str(candidate[0]).strip().upper()
+    if representative_symbol and representative_symbol != requested:
+        representative_name = str(candidate[1] or representative_symbol)
+        return representative_symbol, f"financial_statement_symbol:{requested}->{representative_symbol} ({representative_name})"
+    return requested, None
+
+
 def _quarterly_statement_table(quarterly: pd.DataFrame, row_map: dict[str, str], periods: int) -> pd.DataFrame:
     if quarterly is None or quarterly.empty:
         return pd.DataFrame()
@@ -3388,6 +3457,135 @@ def _quarterly_statement_table(quarterly: pd.DataFrame, row_map: dict[str, str],
     return pd.DataFrame(rows)
 
 
+def _contains_any(value: object, needles: tuple[str, ...]) -> bool:
+    text = str(value or "")
+    return any(needle in text for needle in needles)
+
+
+def _raw_fs_preferred_rows(raw_fs: pd.DataFrame) -> pd.DataFrame:
+    if raw_fs is None or raw_fs.empty:
+        return pd.DataFrame()
+    frame = raw_fs.copy()
+    frame["filing_date"] = pd.to_datetime(frame.get("filing_date"), errors="coerce")
+    frame["amount"] = pd.to_numeric(frame.get("amount"), errors="coerce")
+    frame = frame.dropna(subset=["amount"]).sort_values(
+        ["filing_date", "source_file", "source_row_number"],
+        ascending=[False, False, True],
+    )
+    if frame.empty:
+        return frame
+
+    consolidation = frame.get("consolidation", pd.Series(dtype=object)).astype(str)
+    if consolidation.str.contains("연결", na=False).any():
+        frame = frame[consolidation.str.contains("연결", na=False)].copy()
+    return frame
+
+
+def _raw_fs_statement_table(
+    raw_fs: pd.DataFrame,
+    *,
+    statement_keywords: tuple[str, ...],
+    periods: int,
+    max_items: int = 80,
+) -> pd.DataFrame:
+    frame = _raw_fs_preferred_rows(raw_fs)
+    if frame.empty:
+        return pd.DataFrame()
+    frame = frame[frame["statement_name"].map(lambda value: _contains_any(value, statement_keywords))].copy()
+    if frame.empty:
+        return pd.DataFrame()
+
+    reports = (
+        frame[["source_file", "filing_date", "report_name"]]
+        .drop_duplicates(subset=["source_file"])
+        .sort_values(["filing_date", "source_file"], ascending=[False, False])
+        .head(periods)
+    )
+    if reports.empty:
+        return pd.DataFrame()
+
+    report_labels: dict[str, str] = {}
+    for _, row in reports.iterrows():
+        filing = pd.Timestamp(row["filing_date"]).strftime("%Y-%m-%d") if pd.notna(row["filing_date"]) else "-"
+        report_labels[str(row["source_file"])] = f"{filing} {row['report_name']}"
+
+    frame = frame[frame["source_file"].isin(report_labels.keys())].copy()
+    frame["report_label"] = frame["source_file"].map(report_labels)
+    frame["account_name"] = frame["account_name"].astype(str)
+    pivot = frame.pivot_table(
+        index="account_name",
+        columns="report_label",
+        values="amount",
+        aggfunc="last",
+        sort=False,
+    )
+    if pivot.empty:
+        return pd.DataFrame()
+
+    ordered_cols = list(report_labels.values())
+    pivot = pivot.reindex(columns=[col for col in ordered_cols if col in pivot.columns])
+    out = pivot.reset_index().rename(columns={"account_name": "line_item"})
+    return out.head(max_items)
+
+
+def _raw_fs_recent_table(raw_fs: pd.DataFrame, periods: int) -> pd.DataFrame:
+    frame = _raw_fs_preferred_rows(raw_fs)
+    if frame.empty:
+        return pd.DataFrame()
+    reports = (
+        frame[["source_file", "filing_date"]]
+        .drop_duplicates(subset=["source_file"])
+        .sort_values(["filing_date", "source_file"], ascending=[False, False])
+        .head(periods)
+    )
+    frame = frame[frame["source_file"].isin(set(reports["source_file"].astype(str)))].copy()
+    cols = [
+        "filing_date",
+        "report_name",
+        "consolidation",
+        "statement_name",
+        "account_name",
+        "period_label",
+        "amount",
+        "source_row_number",
+    ]
+    return frame[[col for col in cols if col in frame.columns]].reset_index(drop=True)
+
+
+def _raw_fs_latest_amount(
+    raw_fs: pd.DataFrame,
+    *,
+    statement_keywords: tuple[str, ...],
+    account_candidates: tuple[str, ...],
+) -> float | None:
+    frame = _raw_fs_preferred_rows(raw_fs)
+    if frame.empty:
+        return None
+    frame = frame[frame["statement_name"].map(lambda value: _contains_any(value, statement_keywords))].copy()
+    if frame.empty:
+        return None
+    latest_file = (
+        frame[["source_file", "filing_date"]]
+        .drop_duplicates(subset=["source_file"])
+        .sort_values(["filing_date", "source_file"], ascending=[False, False])
+        .iloc[0]["source_file"]
+    )
+    latest = frame[frame["source_file"] == latest_file].copy()
+    for candidate in account_candidates:
+        exact = latest[latest["account_name"].astype(str) == candidate]
+        if not exact.empty:
+            value = pd.to_numeric(exact["amount"], errors="coerce").dropna()
+            if not value.empty:
+                return float(value.iloc[0])
+    for candidate in account_candidates:
+        contains = latest[latest["account_name"].astype(str).str.contains(candidate, regex=False, na=False)]
+        if not contains.empty:
+            value = pd.to_numeric(contains["amount"], errors="coerce").dropna()
+            if not value.empty:
+                return float(value.iloc[0])
+    return None
+
+
 def _latest_number(frame: pd.DataFrame, col: str) -> float | None:
     if frame is None or frame.empty or col not in frame.columns:
         return None
@@ -3398,6 +3596,20 @@ def _latest_number(frame: pd.DataFrame, col: str) -> float | None:
     return value if np.isfinite(value) else None
 
 
+def _coalesce_fin_value(primary: object, fallback: object) -> object:
+    if primary is None:
+        return fallback
+    try:
+        numeric = float(primary)
+        if np.isfinite(numeric):
+            return primary
+    except Exception:
+        text = str(primary).strip()
+        if text and text.lower() not in {"nan", "none", "null", "-"}:
+            return primary
+    return fallback
+
+
 def _build_financial_context_krx(
     *,
     ticker: str,
@@ -3406,30 +3618,37 @@ def _build_financial_context_krx(
     saved_dir: str | None,
     fallback_reason: str | None,
 ) -> _FinancialContext:
+    requested_ticker = ticker
+    statement_ticker, statement_symbol_note = _resolve_financial_statement_symbol(ticker)
     quarterly, quarterly_source = load_shared_quarterly_fundamentals_for_symbols(
-        [ticker],
+        [statement_ticker],
         limit_per_symbol=max(periods, 4),
     )
+    raw_fs, raw_fs_source = load_shared_krx_fs_rows_for_symbol(
+        statement_ticker,
+        limit_reports=max(periods, 8),
+    )
     close_history, price_source = load_shared_close_prices_for_symbols(
-        [ticker],
+        [statement_ticker],
         start_date=(pd.Timestamp.today().normalize() - pd.Timedelta(days=370)).strftime("%Y-%m-%d"),
     )
     market_caps, market_cap_source = load_shared_market_caps_for_symbols(
-        [ticker],
+        [statement_ticker],
         start_date=(pd.Timestamp.today().normalize() - pd.Timedelta(days=370)).strftime("%Y-%m-%d"),
     )
 
     quarterly = quarterly if quarterly is not None else pd.DataFrame()
+    raw_fs = raw_fs if raw_fs is not None else pd.DataFrame()
     if not quarterly.empty:
         quarterly["fiscal_date"] = pd.to_datetime(quarterly["fiscal_date"], errors="coerce")
         quarterly = quarterly.dropna(subset=["fiscal_date"]).sort_values("fiscal_date", ascending=False).reset_index(drop=True)
 
     close = pd.Series(dtype=float)
-    if close_history is not None and ticker in close_history.columns:
-        close = pd.to_numeric(close_history[ticker], errors="coerce").dropna().sort_index()
+    if close_history is not None and statement_ticker in close_history.columns:
+        close = pd.to_numeric(close_history[statement_ticker], errors="coerce").dropna().sort_index()
     caps = pd.Series(dtype=float)
-    if market_caps is not None and ticker in market_caps.columns:
-        caps = pd.to_numeric(market_caps[ticker], errors="coerce").dropna().sort_index()
+    if market_caps is not None and statement_ticker in market_caps.columns:
+        caps = pd.to_numeric(market_caps[statement_ticker], errors="coerce").dropna().sort_index()
 
     latest_price = float(close.iloc[-1]) if not close.empty else None
     market_cap = float(caps.iloc[-1]) if not caps.empty else None
@@ -3445,6 +3664,42 @@ def _build_financial_context_krx(
     latest_debt = _latest_number(quarterly, "total_debt")
     current_assets = _latest_number(quarterly, "current_assets")
     current_liabilities = _latest_number(quarterly, "current_liabilities")
+    raw_revenue = _raw_fs_latest_amount(
+        raw_fs,
+        statement_keywords=("손익", "포괄손익"),
+        account_candidates=("매출액", "영업수익", "수익(매출액)", "수익"),
+    )
+    raw_operating_income = _raw_fs_latest_amount(
+        raw_fs,
+        statement_keywords=("손익", "포괄손익"),
+        account_candidates=("영업이익", "영업손익"),
+    )
+    raw_net_income = _raw_fs_latest_amount(
+        raw_fs,
+        statement_keywords=("손익", "포괄손익"),
+        account_candidates=("당기순이익", "분기순이익", "반기순이익", "연결당기순이익"),
+    )
+    raw_total_assets = _raw_fs_latest_amount(
+        raw_fs,
+        statement_keywords=("재무상태",),
+        account_candidates=("자산총계",),
+    )
+    raw_total_liabilities = _raw_fs_latest_amount(
+        raw_fs,
+        statement_keywords=("재무상태",),
+        account_candidates=("부채총계",),
+    )
+    raw_equity = _raw_fs_latest_amount(
+        raw_fs,
+        statement_keywords=("재무상태",),
+        account_candidates=("자본총계", "자본총액"),
+    )
+    raw_operating_cash_flow = _raw_fs_latest_amount(
+        raw_fs,
+        statement_keywords=("현금흐름",),
+        account_candidates=("영업활동현금흐름", "영업활동으로 인한 현금흐름", "영업활동 순현금흐름"),
+    )
+    latest_equity = latest_equity if latest_equity is not None else raw_equity
 
     metrics = {
         "Market Cap": market_cap,
@@ -3488,24 +3743,45 @@ def _build_financial_context_krx(
         },
         periods,
     )
+    if income_table.empty:
+        income_table = _raw_fs_statement_table(
+            raw_fs,
+            statement_keywords=("손익", "포괄손익"),
+            periods=periods,
+        )
+    if balance_table.empty:
+        balance_table = _raw_fs_statement_table(
+            raw_fs,
+            statement_keywords=("재무상태",),
+            periods=periods,
+        )
+    if cashflow_table.empty:
+        cashflow_table = _raw_fs_statement_table(
+            raw_fs,
+            statement_keywords=("현금흐름",),
+            periods=periods,
+        )
+    raw_fs_table = _raw_fs_recent_table(raw_fs, periods=periods)
     summary_table = pd.DataFrame(
         [
-            {"line_item": "Revenue", "latest_value": _format_fin_value(latest.get("revenue"))},
-            {"line_item": "Operating Income", "latest_value": _format_fin_value(latest.get("operating_income"))},
-            {"line_item": "Net Income", "latest_value": _format_fin_value(latest.get("net_income"))},
-            {"line_item": "Total Assets", "latest_value": _format_fin_value(latest.get("total_assets"))},
-            {"line_item": "Total Liabilities", "latest_value": _format_fin_value(latest.get("total_liabilities"))},
-            {"line_item": "Operating Cash Flow", "latest_value": _format_fin_value(latest.get("operating_cash_flow"))},
+            {"line_item": "Revenue", "latest_value": _format_fin_value(_coalesce_fin_value(latest.get("revenue") if not latest.empty else None, raw_revenue))},
+            {"line_item": "Operating Income", "latest_value": _format_fin_value(_coalesce_fin_value(latest.get("operating_income") if not latest.empty else None, raw_operating_income))},
+            {"line_item": "Net Income", "latest_value": _format_fin_value(_coalesce_fin_value(latest.get("net_income") if not latest.empty else None, raw_net_income))},
+            {"line_item": "Total Assets", "latest_value": _format_fin_value(_coalesce_fin_value(latest.get("total_assets") if not latest.empty else None, raw_total_assets))},
+            {"line_item": "Total Liabilities", "latest_value": _format_fin_value(_coalesce_fin_value(latest.get("total_liabilities") if not latest.empty else None, raw_total_liabilities))},
+            {"line_item": "Stockholders Equity", "latest_value": _format_fin_value(_coalesce_fin_value(latest.get("stockholders_equity") if not latest.empty else None, raw_equity))},
+            {"line_item": "Operating Cash Flow", "latest_value": _format_fin_value(_coalesce_fin_value(latest.get("operating_cash_flow") if not latest.empty else None, raw_operating_cash_flow))},
             {"line_item": "Free Cash Flow", "latest_value": _format_fin_value(latest.get("free_cash_flow"))},
         ]
     )
 
-    if quarterly.empty and latest_price is None and market_cap is None:
+    if quarterly.empty and raw_fs.empty and latest_price is None and market_cap is None:
         raise ValueError(f"No KRX shared SQLite financial or price data found for '{ticker}'. Refresh KRX data first.")
 
     provider_status_table = _build_financial_provider_status_table(
-        krx_security_master="ok" if _krx_company_name(ticker) != ticker else "missing_name",
-        krx_quarterly_fundamentals="ok" if not quarterly.empty else "empty",
+        krx_security_master="ok" if _krx_company_name(statement_ticker) != statement_ticker else "missing_name",
+        krx_quarterly_fundamentals="ok" if not quarterly.empty else ("raw_fs_fallback" if not raw_fs.empty else "empty"),
+        krx_fs_rows="ok" if not raw_fs.empty else "empty",
         price_history="ok" if latest_price is not None else "empty",
         market_cap_history="ok" if market_cap is not None else "empty",
         external_provider="not used",
@@ -3516,31 +3792,39 @@ def _build_financial_context_krx(
         _metrics_table(metrics).to_csv(out_dir / "financial_metrics.csv", index=False, encoding="utf-8-sig")
         summary_table.to_csv(out_dir / "financial_summary.csv", index=False, encoding="utf-8-sig")
         quarterly.to_csv(out_dir / "krx_quarterly_fundamentals_raw.csv", index=False, encoding="utf-8-sig")
+        raw_fs.to_csv(out_dir / "krx_fs_rows_raw.csv", index=False, encoding="utf-8-sig")
+        income_table.to_csv(out_dir / "financial_income_statement.csv", index=False, encoding="utf-8-sig")
+        balance_table.to_csv(out_dir / "financial_balance_sheet.csv", index=False, encoding="utf-8-sig")
+        cashflow_table.to_csv(out_dir / "financial_cashflow_statement.csv", index=False, encoding="utf-8-sig")
         (out_dir / "financial_source.txt").write_text(
             "source=krx_shared_sqlite\n"
+            f"requested_ticker={requested_ticker}\n"
+            f"statement_ticker={statement_ticker}\n"
             f"quarterly_source={quarterly_source or '-'}\n"
+            f"raw_fs_source={raw_fs_source or '-'}\n"
             f"price_source={price_source or '-'}\n"
             f"market_cap_source={market_cap_source or '-'}\n",
             encoding="utf-8",
         )
 
     return _FinancialContext(
-        ticker=ticker,
-        company_name=_krx_company_name(ticker),
+        ticker=statement_ticker,
+        company_name=_krx_company_name(statement_ticker),
         currency="KRW",
         metrics=metrics,
         summary_table=summary_table,
         income_table=income_table,
         balance_table=balance_table,
         cashflow_table=cashflow_table,
+        raw_fs_table=raw_fs_table,
         saved_dir=saved_dir,
         source_table=_build_financial_source_table(
-            ticker=ticker,
+            ticker=statement_ticker,
             primary_source="krx_shared_sqlite",
-            secondary_source=quarterly_source,
+            secondary_source=quarterly_source or raw_fs_source,
             tertiary_source=price_source or market_cap_source,
-            reason=fallback_reason,
-            warning="quarterly_fundamentals_missing" if quarterly.empty else None,
+            reason="; ".join(part for part in [fallback_reason, statement_symbol_note] if part),
+            warning="using_krx_fs_rows_raw_fallback" if quarterly.empty and not raw_fs.empty else ("quarterly_fundamentals_missing" if quarterly.empty else None),
         ),
         provider_status_table=provider_status_table,
     )
@@ -4085,6 +4369,7 @@ def _html_financial_page(
           <div class="card"><h3>손익계산서(최근 기간)</h3>{_safe_table(ctx.income_table)}</div>
           <div class="card"><h3>재무상태표(최근 기간)</h3>{_safe_table(ctx.balance_table)}</div>
           <div class="card"><h3>현금흐름표(최근 기간)</h3>{_safe_table(ctx.cashflow_table)}</div>
+          <div class="card"><h3>KRX 원문 재무제표 행</h3>{_safe_table(ctx.raw_fs_table, max_rows=800)}</div>
         </div>
         """
 

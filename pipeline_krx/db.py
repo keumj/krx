@@ -170,6 +170,9 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             total_assets REAL,
             total_liabilities REAL,
             stockholders_equity REAL,
+            current_assets REAL,
+            current_liabilities REAL,
+            total_debt REAL,
             operating_cash_flow REAL,
             free_cash_flow REAL,
             capex REAL,
@@ -262,6 +265,10 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_fund_snapshot_as_of_date ON fundamentals_snapshot(as_of_date)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_fund_quarterly_symbol_date ON fundamentals_quarterly(symbol, fiscal_date)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_fund_quarterly_fiscal_date ON fundamentals_quarterly(fiscal_date)")
+    for column_name in ("current_assets", "current_liabilities", "total_debt"):
+        existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(fundamentals_quarterly)")}
+        if column_name not in existing_cols:
+            conn.execute(f"ALTER TABLE fundamentals_quarterly ADD COLUMN {column_name} REAL")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_news_symbol_publish_date ON news_articles(symbol, publish_date)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_news_publish_date ON news_articles(publish_date)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_news_analysis_status_publish_date ON news_articles(analysis_status, publish_date)")
@@ -641,6 +648,9 @@ def upsert_krx_quarterly_fundamentals(
                 _normalize_number(record.get(cols.get("total_assets"))),
                 _normalize_number(record.get(cols.get("total_liabilities"))),
                 _normalize_number(record.get(cols.get("stockholders_equity"))),
+                _normalize_number(record.get(cols.get("current_assets"))),
+                _normalize_number(record.get(cols.get("current_liabilities"))),
+                _normalize_number(record.get(cols.get("total_debt"))),
                 _normalize_number(record.get(cols.get("operating_cash_flow"))),
                 _normalize_number(record.get(cols.get("free_cash_flow"))),
                 _normalize_number(record.get(cols.get("capex"))),
@@ -659,10 +669,10 @@ def upsert_krx_quarterly_fundamentals(
             """
             INSERT INTO fundamentals_quarterly(
                 symbol, fiscal_date, filing_date, period_type, revenue, operating_income, net_income,
-                total_assets, total_liabilities, stockholders_equity, operating_cash_flow, free_cash_flow,
-                capex, diluted_eps, source
+                total_assets, total_liabilities, stockholders_equity, current_assets, current_liabilities,
+                total_debt, operating_cash_flow, free_cash_flow, capex, diluted_eps, source
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(symbol, fiscal_date, period_type) DO UPDATE SET
                 filing_date=COALESCE(excluded.filing_date, fundamentals_quarterly.filing_date),
                 revenue=excluded.revenue,
@@ -671,6 +681,9 @@ def upsert_krx_quarterly_fundamentals(
                 total_assets=excluded.total_assets,
                 total_liabilities=excluded.total_liabilities,
                 stockholders_equity=excluded.stockholders_equity,
+                current_assets=excluded.current_assets,
+                current_liabilities=excluded.current_liabilities,
+                total_debt=excluded.total_debt,
                 operating_cash_flow=excluded.operating_cash_flow,
                 free_cash_flow=excluded.free_cash_flow,
                 capex=excluded.capex,

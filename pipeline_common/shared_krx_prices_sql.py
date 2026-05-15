@@ -327,8 +327,8 @@ def load_shared_quarterly_fundamentals_for_symbols(
     placeholders = ",".join("?" for _ in normalized)
     query = (
         "SELECT symbol, fiscal_date, filing_date, period_type, revenue, operating_income, "
-        "net_income, total_assets, total_liabilities, stockholders_equity, operating_cash_flow, "
-        "free_cash_flow, capex, diluted_eps, source "
+        "net_income, total_assets, total_liabilities, stockholders_equity, current_assets, "
+        "current_liabilities, total_debt, operating_cash_flow, free_cash_flow, capex, diluted_eps, source "
         f"FROM fundamentals_quarterly WHERE symbol IN ({placeholders}) "
         "ORDER BY symbol, fiscal_date DESC"
     )
@@ -346,6 +346,9 @@ def load_shared_quarterly_fundamentals_for_symbols(
         "total_assets",
         "total_liabilities",
         "stockholders_equity",
+        "current_assets",
+        "current_liabilities",
+        "total_debt",
         "operating_cash_flow",
         "free_cash_flow",
         "capex",
@@ -355,6 +358,90 @@ def load_shared_quarterly_fundamentals_for_symbols(
     if limit_per_symbol is not None and int(limit_per_symbol) > 0:
         frame = frame.groupby("symbol", as_index=False, group_keys=False).head(int(limit_per_symbol)).reset_index(drop=True)
     return frame, f"sqlite:{target.as_posix()}"
+
+
+def load_shared_krx_fs_rows_for_symbol(
+    symbol: str,
+    *,
+    limit_reports: int | None = 8,
+    shared_db_root: Path | str | None = None,
+    db_path: Path | str | None = None,
+) -> tuple[pd.DataFrame | None, str | None]:
+    symbol_clean = _normalize_symbol(symbol)
+    if not symbol_clean:
+        return None, None
+
+    target = _target_path(shared_db_root, db_path)
+    if not target.exists():
+        return None, None
+
+    with sqlite3.connect(target) as conn:
+        table_exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'krx_fs_rows'"
+        ).fetchone()
+        if table_exists is None:
+            return None, None
+        cols = {str(row[1]) for row in conn.execute('PRAGMA table_info("krx_fs_rows")')}
+        required = {"symbol", "filing_date", "report_year", "report_name", "source_file", "source_row_number"}
+        if not required.issubset(cols):
+            return None, None
+
+        raw_cols = {
+            "개별/연결": "consolidation",
+            "계정명": "account_name",
+            "당기일자": "period_label",
+            "금액": "amount",
+            "재무제표명": "statement_name",
+        }
+        select_cols = [
+            "symbol",
+            "filing_date",
+            "report_year",
+            "report_name",
+            "source_file",
+            "source_row_number",
+        ]
+        for source, alias in raw_cols.items():
+            if source in cols:
+                select_cols.append(f'"{source}" AS {alias}')
+            else:
+                select_cols.append(f"NULL AS {alias}")
+
+        if limit_reports is not None and int(limit_reports) > 0:
+            report_rows = conn.execute(
+                """
+                SELECT source_file
+                FROM krx_fs_rows
+                WHERE symbol = ?
+                GROUP BY source_file
+                ORDER BY MAX(filing_date) DESC, source_file DESC
+                LIMIT ?
+                """,
+                (symbol_clean, int(limit_reports)),
+            ).fetchall()
+            source_files = [str(row[0]) for row in report_rows]
+            if not source_files:
+                return None, None
+            placeholders = ",".join("?" for _ in source_files)
+            query = (
+                f"SELECT {', '.join(select_cols)} FROM krx_fs_rows "
+                f"WHERE symbol = ? AND source_file IN ({placeholders}) "
+                "ORDER BY filing_date DESC, source_file DESC, source_row_number ASC"
+            )
+            params: list[object] = [symbol_clean, *source_files]
+        else:
+            query = (
+                f"SELECT {', '.join(select_cols)} FROM krx_fs_rows "
+                "WHERE symbol = ? "
+                "ORDER BY filing_date DESC, source_file DESC, source_row_number ASC"
+            )
+            params = [symbol_clean]
+        frame = pd.read_sql_query(query, conn, params=params)
+
+    if frame.empty:
+        return None, None
+    frame["amount"] = pd.to_numeric(frame["amount"], errors="coerce")
+    return frame, f"sqlite:{target.as_posix()}:krx_fs_rows"
 
 
 def _normalize_news_analysis_status(value: str) -> str:
