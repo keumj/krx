@@ -4,6 +4,12 @@ import sqlite3
 import sys
 from pathlib import Path
 
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from pipeline_krx_macro.macro_data_store import connect_macro_readonly
+
 
 def _query(conn: sqlite3.Connection, query: str) -> tuple[object, ...] | None:
     try:
@@ -40,7 +46,7 @@ def _print_macro() -> int:
     print(f"sqlite_exists={db_path.exists()} size_bytes={db_path.stat().st_size if db_path.exists() else 0}")
     if not db_path.exists():
         return 1
-    with sqlite3.connect(db_path) as conn:
+    with connect_macro_readonly(db_path) as conn:
         row = _query(conn, "SELECT MIN(date), MAX(date), COUNT(*), COUNT(DISTINCT series_id) FROM macro_series")
         if row:
             print(f"macro_series: min_date={row[0] or '-'} max_date={row[1] or '-'} rows={row[2] or 0} series={row[3] or 0}")

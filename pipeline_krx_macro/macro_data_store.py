@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 import sqlite3
 from dataclasses import dataclass
+from contextlib import contextmanager
+from collections.abc import Iterator
 from pathlib import Path
 
 import pandas as pd
@@ -197,6 +199,28 @@ def macro_db_path(path: str | os.PathLike[str] | None = None) -> Path:
     return Path(path) if path else DEFAULT_MACRO_DB_PATH
 
 
+def _immutable_sqlite_uri(path: Path) -> str:
+    return f"file:{path.resolve().as_posix()}?immutable=1"
+
+
+@contextmanager
+def connect_macro_readonly(path: str | os.PathLike[str] | None = None) -> Iterator[sqlite3.Connection]:
+    """Open the macro DB for reads, falling back when SQLite sidecar files cannot be opened."""
+    target = macro_db_path(path)
+    conn = sqlite3.connect(target)
+    try:
+        try:
+            conn.execute("PRAGMA database_list").fetchone()
+        except sqlite3.OperationalError as exc:
+            conn.close()
+            if "unable to open database file" not in str(exc).lower():
+                raise
+            conn = sqlite3.connect(_immutable_sqlite_uri(target), uri=True)
+        yield conn
+    finally:
+        conn.close()
+
+
 def ensure_macro_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
         """
@@ -280,8 +304,7 @@ def read_macro_series(series_id: str, *, start_date: str | pd.Timestamp, db_path
     path = macro_db_path(db_path)
     if not path.is_file():
         return None, None
-    with sqlite3.connect(path) as conn:
-        ensure_macro_schema(conn)
+    with connect_macro_readonly(path) as conn:
         raw = pd.read_sql_query(
             "SELECT date, value FROM macro_series WHERE series_id = ? AND date >= ? ORDER BY date",
             conn,
@@ -304,8 +327,7 @@ def read_macro_frame(series_ids: list[str], *, start_date: str | pd.Timestamp, d
         return None, None
     placeholders = ",".join(["?"] * len(series_ids))
     params: list[object] = [*series_ids, pd.Timestamp(start_date).normalize().strftime("%Y-%m-%d")]
-    with sqlite3.connect(path) as conn:
-        ensure_macro_schema(conn)
+    with connect_macro_readonly(path) as conn:
         raw = pd.read_sql_query(
             f"SELECT date, series_id, value FROM macro_series WHERE series_id IN ({placeholders}) AND date >= ? ORDER BY date, series_id",
             conn,

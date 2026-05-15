@@ -9,7 +9,7 @@ from typing import Any
 
 from app.settings import settings
 from pipeline_common.shared_krx_prices_sql import shared_prices_sqlite_path
-from pipeline_krx_macro.macro_data_store import DEFAULT_MACRO_DB_PATH
+from pipeline_krx_macro.macro_data_store import DEFAULT_MACRO_DB_PATH, connect_macro_readonly
 
 
 STATE_RELATIVE_PATH = Path("outputs") / "refresh_state.json"
@@ -77,11 +77,12 @@ def _display_project_path(path: Path) -> str:
         return path.as_posix()
 
 
-def _sqlite_fetchone(path: Path, query: str) -> tuple[Any, ...] | None:
+def _sqlite_fetchone(path: Path, query: str, *, macro_readonly: bool = False) -> tuple[Any, ...] | None:
     if not path.exists():
         return None
     try:
-        with sqlite3.connect(path) as conn:
+        manager = connect_macro_readonly(path) if macro_readonly else sqlite3.connect(path)
+        with manager as conn:
             return conn.execute(query).fetchone()
     except Exception:
         return None
@@ -130,7 +131,7 @@ def collect_data_status(root: Path | None = None) -> dict[str, Any]:
         "SELECT MAX(fiscal_date), COUNT(*), COUNT(DISTINCT symbol), MAX(updated_at) FROM fundamentals_quarterly",
     )
     news = _sqlite_fetchone(shared_sqlite, "SELECT MAX(publish_date), COUNT(*), COUNT(DISTINCT symbol) FROM news_articles")
-    macro = _sqlite_fetchone(macro_sqlite, "SELECT MAX(date), COUNT(*), COUNT(DISTINCT series_id) FROM macro_series")
+    macro = _sqlite_fetchone(macro_sqlite, "SELECT MAX(date), COUNT(*), COUNT(DISTINCT series_id) FROM macro_series", macro_readonly=True)
 
     return {
         "shared_sqlite": {
