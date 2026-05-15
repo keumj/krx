@@ -32,14 +32,13 @@ data/*_shares.csv
 
 # Data directory cleanup: ignore all sqlite and large csv files
 #data/krx_market_caps.csv
-#data/krx_shared_db/
-#data/**/*.sqlite*
+data/krx_shared_db/
+data/**/*.sqlite*
 #data/**/*.db
 #data/**/*.csv
 data/price_cache/*.csv
 data/technical_ohlcv_cache/*.csv
 data/portfolio/**
-data/macro_prices.sqlite
 
 # Keep essential config files if any (example)
 #!data/krx_components.csv

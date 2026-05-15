@@ -1,2 +1,0 @@
-data/krx_shared_db/krx_shared_prices.sqlite filter=lfs diff=lfs merge=lfs -text
-data/macro_prices.sqlite filter=lfs diff=lfs merge=lfs -text

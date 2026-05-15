@@ -29,9 +29,9 @@ echo  Python: %PYTHON_EXE%
 echo.
 echo  [1] Refresh KRX prices / market caps / shared SQLite
 echo  [2] Refresh KRX DART quarterly fundamentals in shared SQLite
-echo  [3] Refresh KRX news in shared SQLite
+echo  [3] KRX news refresh is skipped for now
 echo  [4] Refresh KRX macro market/FRED data in macro SQLite
-echo  [5] Run all refresh jobs
+echo  [5] Run latest-data refresh jobs ^(without news^)
 echo  [0] Exit
 echo.
 
@@ -77,13 +77,12 @@ call :show_latest quarterly
 goto :status
 
 :news
-call :run_module pipeline_common.refresh_krx_news
-if errorlevel 1 (
-  set "EXIT_CODE=%ERRORLEVEL%"
-  goto :status
-)
+echo.
+echo ------------------------------------------------------------
+echo KRX news refresh is currently skipped.
+echo ------------------------------------------------------------
+echo Use stock, quarterly, macro, or all to refresh latest non-news data.
 set "REFRESH_OK=1"
-call :show_latest news
 goto :status
 
 :macro
@@ -109,12 +108,6 @@ if errorlevel 1 (
   goto :status
 )
 call :show_latest quarterly
-call :run_module pipeline_common.refresh_krx_news
-if errorlevel 1 (
-  set "EXIT_CODE=%ERRORLEVEL%"
-  goto :status
-)
-call :show_latest news
 call :run_module pipeline_krx_macro.refresh_macro_prices --years 10 --daily-core --require-ecos
 if errorlevel 1 (
   set "EXIT_CODE=%ERRORLEVEL%"
