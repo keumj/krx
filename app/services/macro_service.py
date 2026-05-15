@@ -14,9 +14,9 @@ def render(page: str, *, start_date: str | None = None, lookback_days: int = 504
     except Exception as exc:
         body = f"""
         <div class="service-card">
-          <h1>거시분석</h1>
+          <h1>거시 분석</h1>
           <p class="service-error">{type(exc).__name__}: {exc}</p>
           <pre class="service-error">{traceback.format_exc(limit=4)}</pre>
         </div>
         """
-    return shell("거시분석 | Keumj KRX Lab", body, active="macro", start_page_only=True)
+    return shell("거시 분석 | Keumj KRX Lab", body, active="macro")

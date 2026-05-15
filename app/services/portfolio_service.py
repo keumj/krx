@@ -23,7 +23,7 @@ from pipeline_krx_portfolio.analysis import (
     _get_db_max_date,
 )
 
-from app.web import add_start_page_link, inject_busy_cursor_overlay
+from app.web import add_service_top_nav, inject_busy_cursor_overlay
 from app.services.dataframe import frame_records
 from app.services.auth_service import AuthUser, portfolio_db_for_user
 from app.services import db_service, portfolio_snapshot_service
@@ -112,7 +112,7 @@ class PortfolioRange:
 
 
 def _prepare_portfolio_html(page: str, html: str, *, user: AuthUser | None = None) -> str:
-    html = add_start_page_link(html)
+    html = add_service_top_nav(html, active="portfolio", admin=bool(user and user.is_admin))
     soup: BeautifulSoup | None = None
     if user is not None:
         soup = BeautifulSoup(html, "html.parser")
