@@ -998,9 +998,7 @@ def _build_direction_model_specs(random_state: int) -> list[tuple[str, object]]:
                     scoring="neg_log_loss",
                     max_iter=5000,
                     class_weight="balanced",
-                    l1_ratios=(0.0,),
                     random_state=random_state,
-                    use_legacy_attributes=False,
                 ),
             ),
         ]

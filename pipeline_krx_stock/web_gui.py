@@ -234,6 +234,20 @@ def _format_pct(value: object, ndigits: int = 2) -> str:
     return f"{numeric * 100.0:,.{ndigits}f}%"
 
 
+def _lookup_number(values: dict[str, object], key: str) -> float | None:
+    try:
+        value = values.get(key)
+    except Exception:
+        return None
+    if value is None:
+        return None
+    try:
+        numeric = float(value)
+    except Exception:
+        return None
+    return numeric if np.isfinite(numeric) else None
+
+
 def _krx_components_candidates() -> list[Path]:
     candidates = [
         os.getenv("KRX_COMPONENTS_CSV_PATH", "").strip(),
