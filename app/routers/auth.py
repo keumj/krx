@@ -96,15 +96,7 @@ def auth_panel(*, next_url: str, user: auth_service.AuthUser | None = None, erro
         """
 
     error_html = f'<div class="service-error" style="margin-bottom:10px;">{html.escape(error)}</div>' if error else ""
-    try:
-        register_disabled = (not settings.auth_allow_registration and auth_service.user_count() > 0)
-    except RuntimeError as exc:
-        return f"""
-    <section id="login" class="service-card">
-      <h2 style="margin:0 0 8px;">로그인</h2>
-      <div class="service-error" style="margin-bottom:10px;">{html.escape(str(exc))}</div>
-    </section>
-    """
+    register_disabled = (not settings.auth_allow_registration and auth_service.user_count() > 0)
     register_html = (
         '<p class="service-muted" style="margin:0;">신규 사용자 등록이 비활성화되어 있습니다.</p>'
         if register_disabled
@@ -164,17 +156,11 @@ def login_page(next: str | None = None) -> RedirectResponse:
 async def login(request: Request):
     form = await read_form(request)
     next_url = _safe_next(form.get("next"))
-    try:
-        user = auth_service.authenticate(form.get("username", ""), form.get("password", ""))
-    except RuntimeError as exc:
-        return RedirectResponse(f"/?next={quote(next_url, safe='')}&auth_error={quote(str(exc), safe='')}#login", status_code=303)
+    user = auth_service.authenticate(form.get("username", ""), form.get("password", ""))
     if user is None:
         return RedirectResponse(f"/?next={quote(next_url, safe='')}&auth_error=login#login", status_code=303)
     response = RedirectResponse(next_url, status_code=303)
-    try:
-        _set_session_cookie(response, user)
-    except RuntimeError as exc:
-        return RedirectResponse(f"/?next={quote(next_url, safe='')}&auth_error={quote(str(exc), safe='')}#login", status_code=303)
+    _set_session_cookie(response, user)
     return response
 
 
@@ -189,13 +175,10 @@ async def register(request: Request):
     next_url = _safe_next(form.get("next"))
     try:
         user = auth_service.create_user(form.get("username", ""), form.get("password", ""))
-    except (RuntimeError, ValueError) as exc:
+    except ValueError as exc:
         return RedirectResponse(f"/?next={quote(next_url, safe='')}&auth_error={quote(str(exc), safe='')}#login", status_code=303)
     response = RedirectResponse(next_url, status_code=303)
-    try:
-        _set_session_cookie(response, user)
-    except RuntimeError as exc:
-        return RedirectResponse(f"/?next={quote(next_url, safe='')}&auth_error={quote(str(exc), safe='')}#login", status_code=303)
+    _set_session_cookie(response, user)
     return response
 
 

@@ -37,13 +37,8 @@ def _connect_remote():
 
 def _connect_local():
     path = _local_auth_db_path()
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        return sqlite3.connect(path)
-    except (OSError, sqlite3.Error) as exc:
-        raise RuntimeError(
-            f"Cannot open auth database at {path}. Check KEUMJM_AUTH_DB_PATH and directory write permissions."
-        ) from exc
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return sqlite3.connect(path)
 
 
 @contextmanager
