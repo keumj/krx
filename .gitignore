@@ -13,6 +13,7 @@ outputs/**
 !outputs/**/.gitkeep
 certs/
 data/users/
+data/app_state/
 
 data/.yfinance_tz_cache/
 data/.yfinance_cache/

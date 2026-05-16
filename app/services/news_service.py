@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 
 from pipeline_krx_stock_news import web_gui as news_web
 
+from app.services.result_cache import load_pickle, save_pickle
 from app.web import add_service_top_nav, inject_busy_cursor_overlay, rewrite_links
 
 
@@ -34,13 +35,33 @@ class NewsPageState:
     error: str | None = None
 
 
-_states: dict[str, dict[str, NewsPageState]] = {}
+_states: dict[str, NewsPageState] = {}
+_global_state = load_pickle("news_last_state.pkl", NewsPageState())
+if not isinstance(_global_state, NewsPageState):
+    _global_state = NewsPageState()
 _states_lock = threading.RLock()
 
 
-def _session_states(session_key: str) -> dict[str, NewsPageState]:
+def _session_state(session_key: str) -> NewsPageState:
     with _states_lock:
-        return _states.setdefault(session_key, {key: NewsPageState() for key in news_web.PAGE_TO_SECTIONS})
+        if session_key not in _states:
+            _states[session_key] = NewsPageState(
+                form=dict(_global_state.form),
+                dashboard=_global_state.dashboard,
+                error=_global_state.error,
+            )
+        return _states[session_key]
+
+
+def _remember_state(state: NewsPageState) -> None:
+    global _global_state
+    with _states_lock:
+        _global_state = NewsPageState(
+            form=dict(state.form),
+            dashboard=state.dashboard,
+            error=state.error,
+        )
+        save_pickle("news_last_state.pkl", _global_state)
 
 
 PAGE_ALIASES = {
@@ -68,7 +89,7 @@ def _render_func(page_key: str):
 
 def render(page: str, *, session_key: str = "global") -> str:
     page_key = PAGE_ALIASES.get(page, "overview")
-    state = _session_states(session_key)[page_key]
+    state = _session_state(session_key)
     ctx = news_web._PageContext(
         dashboard=state.dashboard,
         form=state.form,
@@ -80,7 +101,7 @@ def render(page: str, *, session_key: str = "global") -> str:
 
 def run(page: str, form: dict[str, str], *, session_key: str = "global") -> str:
     page_key = PAGE_ALIASES.get(page, "overview")
-    state = _session_states(session_key)[page_key]
+    state = _session_state(session_key)
     page_form = news_web._default_form()
     page_form.update({key: str(value).strip() for key, value in form.items()})
     page_form["ticker"] = page_form.get("ticker", "").strip().upper()
@@ -89,8 +110,9 @@ def run(page: str, form: dict[str, str], *, session_key: str = "global") -> str:
     page_form["event_keywords"] = news_web._keywords_from_form(page_form)
     state.form = page_form
     try:
-        state.dashboard = news_web._build_dashboard_from_form(page_form, page_key)
+        state.dashboard = news_web._build_dashboard_from_form(page_form, "all")
         state.error = None
+        _remember_state(state)
     except Exception as exc:
         state.dashboard = None
         state.error = f"{type(exc).__name__}: {exc}\n\n{traceback.format_exc(limit=3)}"

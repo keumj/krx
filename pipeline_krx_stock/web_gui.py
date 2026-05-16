@@ -752,6 +752,17 @@ def _html_reason_list(items: list[str]) -> str:
     return f"<ul>{rendered}</ul>"
 
 
+def _load_common_price_history(ticker: str, *, start_date: str) -> tuple[pd.Series, str]:
+    ticker_clean = str(ticker or "").strip().upper()
+    if not ticker_clean:
+        return pd.Series(dtype=float), "common:empty_ticker"
+    common_prices, common_source = fetch_krx_close_prices([ticker_clean], start_date)
+    if common_prices is None or common_prices.empty or ticker_clean not in common_prices.columns:
+        return pd.Series(dtype=float), f"common:{common_source or 'empty'}"
+    close = pd.Series(common_prices[ticker_clean], dtype=float).dropna().sort_index()
+    return close, f"common:{common_source}"
+
+
 def _run_decision_once(
     form: dict[str, str],
     *,

@@ -3,6 +3,7 @@ from __future__ import annotations
 import traceback
 from dataclasses import dataclass
 from datetime import datetime
+import threading
 from typing import Callable
 
 from bs4 import BeautifulSoup
@@ -27,6 +28,7 @@ from app.web import add_service_top_nav, inject_busy_cursor_overlay
 from app.services.dataframe import frame_records
 from app.services.auth_service import AuthUser, portfolio_db_for_user
 from app.services import db_service, portfolio_snapshot_service
+from app.services.result_cache import load_pickle, save_pickle
 
 
 DEFAULT_START_DATE = "2025-12-31"
@@ -109,6 +111,91 @@ class PortfolioRange:
     lookback_days: int
     start_date: str
     end_date: str
+
+
+@dataclass
+class _LastPortfolioResults:
+    dashboard: object | None = None
+    dashboard_range: PortfolioRange | None = None
+    optimization: object | None = None
+    optimization_range: PortfolioRange | None = None
+    optimization_params: dict[str, object] | None = None
+    virtual_result: object | None = None
+    virtual_range: PortfolioRange | None = None
+
+
+_last_results = load_pickle("portfolio_last_results.pkl", _LastPortfolioResults())
+if not isinstance(_last_results, _LastPortfolioResults):
+    _last_results = _LastPortfolioResults()
+_last_results_lock = threading.RLock()
+
+
+def _remember_dashboard_result(dashboard: object | None, date_range: PortfolioRange) -> None:
+    if dashboard is None:
+        return
+    with _last_results_lock:
+        _last_results.dashboard = dashboard
+        _last_results.dashboard_range = date_range
+        save_pickle("portfolio_last_results.pkl", _last_results)
+
+
+def _load_dashboard_result(fallback_range: PortfolioRange) -> tuple[object | None, PortfolioRange, str | None]:
+    with _last_results_lock:
+        if _last_results.dashboard is None:
+            return None, fallback_range, None
+        return (
+            _last_results.dashboard,
+            _last_results.dashboard_range or fallback_range,
+            "이전에 실행한 포트폴리오 분석 결과를 불러왔습니다.",
+        )
+
+
+def _remember_optimization_result(
+    optimization: object | None,
+    date_range: PortfolioRange,
+    params: dict[str, object],
+) -> None:
+    if optimization is None:
+        return
+    with _last_results_lock:
+        _last_results.optimization = optimization
+        _last_results.optimization_range = date_range
+        _last_results.optimization_params = dict(params)
+        save_pickle("portfolio_last_results.pkl", _last_results)
+
+
+def _load_optimization_result(
+    fallback_range: PortfolioRange,
+) -> tuple[object | None, PortfolioRange, dict[str, object] | None, str | None]:
+    with _last_results_lock:
+        if _last_results.optimization is None:
+            return None, fallback_range, None, None
+        return (
+            _last_results.optimization,
+            _last_results.optimization_range or fallback_range,
+            dict(_last_results.optimization_params or {}),
+            "이전에 실행한 최적화 결과를 불러왔습니다.",
+        )
+
+
+def _remember_virtual_result(result: object | None, date_range: PortfolioRange) -> None:
+    if result is None:
+        return
+    with _last_results_lock:
+        _last_results.virtual_result = result
+        _last_results.virtual_range = date_range
+        save_pickle("portfolio_last_results.pkl", _last_results)
+
+
+def _load_virtual_result(fallback_range: PortfolioRange) -> tuple[object | None, PortfolioRange, str | None]:
+    with _last_results_lock:
+        if _last_results.virtual_result is None:
+            return None, fallback_range, None
+        return (
+            _last_results.virtual_result,
+            _last_results.virtual_range or fallback_range,
+            "이전에 실행한 가상거래 분석 결과를 불러왔습니다.",
+        )
 
 
 def _prepare_portfolio_html(page: str, html: str, *, user: AuthUser | None = None) -> str:
@@ -345,6 +432,7 @@ def render_page(
                 start_date=date_range.start_date,
                 end_date=date_range.end_date,
             )
+            _remember_dashboard_result(dashboard, date_range)
             if user is not None:
                 portfolio_snapshot_service.save_dashboard_snapshot(
                     user.id,
@@ -365,6 +453,12 @@ def render_page(
                 virtual_result = virtual_snapshot.payload
                 date_range = _range_from_snapshot(virtual_snapshot.range_info, date_range)
                 snapshot_message = _snapshot_notice(virtual_snapshot.updated_at, "가상거래 분석")
+    if dashboard is None:
+        dashboard, date_range, last_message = _load_dashboard_result(date_range)
+        snapshot_message = snapshot_message or last_message
+    if page == "virtual-trade" and virtual_result is None:
+        virtual_result, date_range, last_message = _load_virtual_result(date_range)
+        snapshot_message = snapshot_message or last_message
     ctx = portfolio_web._PageContext(
         dashboard=dashboard,
         lookback_days=date_range.lookback_days,
@@ -383,6 +477,7 @@ def render_page(
         "virtual-trade": portfolio_web._virtual_trade_page,
     }
     if page == "optimization":
+        last_params = None
         if run and page_error is None:
             try:
                 optimization = build_portfolio_optimization(
@@ -396,17 +491,19 @@ def render_page(
                     max_position_pct=max_position_pct,
                     cash_buffer_pct=cash_buffer_pct,
                 )
+                optimization_params = {
+                    "universe_size": universe_size,
+                    "sector_cap_pct": sector_cap_pct,
+                    "max_position_pct": max_position_pct,
+                    "cash_buffer_pct": cash_buffer_pct,
+                }
+                _remember_optimization_result(optimization, date_range, optimization_params)
                 if user is not None:
                     portfolio_snapshot_service.save_optimization_snapshot(
                         user.id,
                         optimization,
                         range_info=_snapshot_range_info(date_range),
-                        optimization_params={
-                            "universe_size": universe_size,
-                            "sector_cap_pct": sector_cap_pct,
-                            "max_position_pct": max_position_pct,
-                            "cash_buffer_pct": cash_buffer_pct,
-                        },
+                        optimization_params=optimization_params,
                     )
             except Exception as exc:
                 page_error = f"{type(exc).__name__}: {exc}\n\n{traceback.format_exc(limit=3)}"
@@ -419,11 +516,20 @@ def render_page(
                 ctx.start_date = date_range.start_date
                 ctx.end_date = date_range.end_date
                 ctx.message = message or _snapshot_notice(optimization_snapshot.updated_at, "최적화")
+        if optimization is None:
+            optimization, date_range, last_params, last_message = _load_optimization_result(date_range)
+            if optimization is not None:
+                ctx.lookback_days = date_range.lookback_days
+                ctx.start_date = date_range.start_date
+                ctx.end_date = date_range.end_date
+                ctx.message = message or ctx.message or last_message
         ctx.error = page_error
         ctx.optimization = optimization
         ctx.optimization_params = (
             dict(optimization_snapshot.extra.get("optimization_params", {}))
             if optimization_snapshot is not None and optimization_snapshot.extra
+            else last_params
+            if last_params is not None
             else {
                 "universe_size": universe_size,
                 "sector_cap_pct": sector_cap_pct,
@@ -496,6 +602,7 @@ def render_virtual_trade(form: dict[str, str], *, user: AuthUser | None = None) 
             start_date=date_range.start_date,
             end_date=date_range.end_date,
         )
+        _remember_dashboard_result(dashboard, date_range)
     except Exception as exc:
         dashboard_error = f"{type(exc).__name__}: {exc}"
     result = analyze_virtual_trades(
@@ -507,6 +614,7 @@ def render_virtual_trade(form: dict[str, str], *, user: AuthUser | None = None) 
         end_date=date_range.end_date,
         forecast_horizon_days=int(form.get("forecast_horizon_days", "10") or 10),
     )
+    _remember_virtual_result(result, date_range)
     if user is not None:
         portfolio_snapshot_service.save_virtual_trade_snapshot(
             user.id,

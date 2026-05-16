@@ -1261,6 +1261,7 @@ def _html_refresh_history_page() -> str:
 """
 def _build_dashboard_from_form(form: dict[str, str], page_key: str) -> StockNewsDashboard:
     ticker = form.get("ticker", "").strip().upper() or None
+    sections = None if page_key == "all" else PAGE_TO_SECTIONS.get(page_key)
     return build_stock_news_dashboard(
         event_keywords=_keywords_from_form(form),
         ticker=ticker,
@@ -1268,7 +1269,7 @@ def _build_dashboard_from_form(form: dict[str, str], page_key: str) -> StockNews
         horizon_days=max(int(form.get("horizon_days", DEFAULT_EVENT_HORIZON_DAYS) or DEFAULT_EVENT_HORIZON_DAYS), 1),
         divergence_top_n=max(int(form.get("divergence_top_n", DEFAULT_DIVERGENCE_TOP_N) or DEFAULT_DIVERGENCE_TOP_N), 1),
         topic_count=max(int(form.get("topic_count", DEFAULT_TOPIC_COUNT) or DEFAULT_TOPIC_COUNT), 2),
-        sections=PAGE_TO_SECTIONS.get(page_key),
+        sections=sections,
     )
 
 
@@ -1298,9 +1299,9 @@ def launch_web_gui(host: str = "localhost", port: int = 8514, open_browser: bool
         @classmethod
         def _page_context(cls, page_key: str) -> _PageContext:
             return _PageContext(
-                dashboard=cls.state_page_dashboards.get(page_key),
-                form=dict(cls.state_page_forms.get(page_key, cls.state_form)),
-                error=cls.state_page_errors.get(page_key),
+                dashboard=cls.state_page_dashboards.get(page_key) or cls.state_page_dashboards.get("all"),
+                form=dict(cls.state_page_forms.get(page_key, cls.state_page_forms.get("all", cls.state_form))),
+                error=cls.state_page_errors.get(page_key) or cls.state_page_errors.get("all"),
                 ticker_note=cls.state_page_ticker_notes.get(page_key),
                 ticker_note_error=cls.state_page_ticker_note_errors.get(page_key, False),
             )
@@ -1313,11 +1314,14 @@ def launch_web_gui(host: str = "localhost", port: int = 8514, open_browser: bool
 
         @classmethod
         def _store_page_result(cls, page_key: str, form: dict[str, str], dashboard: StockNewsDashboard) -> None:
-            cls._store_page_form(page_key, form)
-            cls.state_page_dashboards[page_key] = dashboard
-            cls.state_page_errors[page_key] = None
-            cls.state_page_ticker_notes[page_key] = None
-            cls.state_page_ticker_note_errors[page_key] = False
+            copied = dict(form)
+            cls.state_form = copied
+            for key in (*PAGE_TO_SECTIONS.keys(), "all"):
+                cls.state_page_forms[key] = copied
+                cls.state_page_dashboards[key] = dashboard
+                cls.state_page_errors[key] = None
+                cls.state_page_ticker_notes[key] = None
+                cls.state_page_ticker_note_errors[key] = False
 
         @classmethod
         def _store_page_note(
@@ -1398,7 +1402,7 @@ def launch_web_gui(host: str = "localhost", port: int = 8514, open_browser: bool
                 self.__class__._store_page_form(page_key, page_form)
                 if query.get("intent", [""])[0].strip().lower() == "run":
                     try:
-                        dashboard = _build_dashboard_from_form(page_form, page_key)
+                        dashboard = _build_dashboard_from_form(page_form, "all")
                         self.__class__._store_page_result(page_key, page_form, dashboard)
                     except Exception as exc:  # pragma: no cover
                         self.__class__._store_page_error(
@@ -1487,7 +1491,7 @@ def launch_web_gui(host: str = "localhost", port: int = 8514, open_browser: bool
                         page_form = {**form, "ticker": resolved_ticker}
                     self.__class__._store_page_note(page_key, page_form, ticker_note, ticker_note_error)
                 else:
-                    dashboard = _build_dashboard_from_form(form, page_key)
+                    dashboard = _build_dashboard_from_form(form, "all")
                     self.__class__._store_page_result(page_key, form, dashboard)
             except Exception as exc:  # pragma: no cover
                 current_form = dict(self.__class__.state_page_forms.get(page_key, self.state_form))

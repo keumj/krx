@@ -524,9 +524,16 @@ def _playbook_page(dashboard: MacroDashboard) -> str:
     """
 
 
-def render_body(page: str, *, start_date: str | None = None, lookback_days: int = DEFAULT_LOOKBACK_DAYS) -> str:
+def render_body(
+    page: str,
+    *,
+    start_date: str | None = None,
+    lookback_days: int = DEFAULT_LOOKBACK_DAYS,
+    dashboard: MacroDashboard | None = None,
+) -> str:
     active = normalize_page(page)
-    dashboard = build_macro_dashboard(start_date=start_date, lookback_days=lookback_days)
+    if dashboard is None:
+        dashboard = build_macro_dashboard(start_date=start_date, lookback_days=lookback_days)
     page_html = {
         "overview": _overview_page,
         "regime": _regime_page,

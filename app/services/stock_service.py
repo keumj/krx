@@ -8,6 +8,7 @@ from datetime import datetime
 
 from pipeline_krx_stock import web_gui as stock_web
 
+from app.services.result_cache import load_pickle, save_pickle
 from app.web import add_service_top_nav, inject_busy_cursor_overlay, rewrite_links
 
 
@@ -109,12 +110,60 @@ class StockState:
 
 
 _states: dict[str, StockState] = {}
+_global_state = load_pickle("stock_last_state.pkl", StockState())
+if not isinstance(_global_state, StockState):
+    _global_state = StockState()
 _states_lock = threading.RLock()
+
+
+def _copy_state(source: StockState) -> StockState:
+    copied = StockState()
+    for attr in (
+        "forecast_form",
+        "financials_form",
+        "technical_form",
+        "returns_form",
+        "risk_form",
+        "factor_form",
+        "decision_form",
+        "wfv_form",
+    ):
+        setattr(copied, attr, dict(getattr(source, attr)))
+    for attr in (
+        "forecast_ctx",
+        "forecast_error",
+        "financials_ctx",
+        "financials_error",
+        "technical_ctx",
+        "technical_error",
+        "technical_cache",
+        "returns_ctx",
+        "returns_error",
+        "risk_ctx",
+        "risk_error",
+        "factor_ctx",
+        "factor_error",
+        "decision_ctx",
+        "decision_error",
+        "wfv_ctx",
+        "wfv_error",
+    ):
+        setattr(copied, attr, getattr(source, attr))
+    return copied
 
 
 def _state(session_key: str) -> StockState:
     with _states_lock:
-        return _states.setdefault(session_key, StockState())
+        if session_key not in _states:
+            _states[session_key] = _copy_state(_global_state)
+        return _states[session_key]
+
+
+def _remember_state(state: StockState) -> None:
+    global _global_state
+    with _states_lock:
+        _global_state = _copy_state(state)
+        save_pickle("stock_last_state.pkl", _global_state)
 
 
 def _clean_stock_html(html: str) -> str:
@@ -234,11 +283,13 @@ def run(action: str, form: dict[str, str], *, session_key: str = "global") -> st
                 retry_form = {**state.forecast_form, "start_date": "", "end_date": ""}
                 state.forecast_ctx = stock_web._run_once(retry_form)
             state.forecast_error = None
+            _remember_state(state)
             return "forecast"
         if action == "financials":
             state.financials_form = {**state.financials_form, **form, "ticker": ticker}
             state.financials_ctx = stock_web._run_financial_once(state.financials_form)
             state.financials_error = None
+            _remember_state(state)
             return "financials"
         if action == "technical":
             form["action"] = stock_web._normalize_technical_action(form.get("action", "all"))
@@ -249,21 +300,25 @@ def run(action: str, form: dict[str, str], *, session_key: str = "global") -> st
                 cache=state.technical_cache,
             )
             state.technical_error = None
+            _remember_state(state)
             return "technical"
         if action == "returns":
             state.returns_form = {"ticker": ticker}
             state.returns_ctx = stock_web._run_returns_once(state.returns_form)
             state.returns_error = None
+            _remember_state(state)
             return "returns"
         if action == "risk":
             state.risk_form = {"ticker": ticker}
             state.risk_ctx = stock_web._run_risk_once(state.risk_form)
             state.risk_error = None
+            _remember_state(state)
             return "risk"
         if action == "factor":
             state.factor_form = {"ticker": ticker}
             state.factor_ctx = stock_web._run_factor_once(state.factor_form)
             state.factor_error = None
+            _remember_state(state)
             return "factor-regime"
         if action == "decision":
             state.decision_form = {"ticker": ticker}
@@ -278,6 +333,7 @@ def run(action: str, form: dict[str, str], *, session_key: str = "global") -> st
                 fin_ctx=_matching_financials_ctx(state, ticker),
             )
             state.decision_error = None
+            _remember_state(state)
             return "decision"
         if action == "walk-forward":
             state.wfv_form = {**state.wfv_form, **form, "ticker": ticker}
@@ -294,6 +350,7 @@ def run(action: str, form: dict[str, str], *, session_key: str = "global") -> st
                 }
                 state.wfv_ctx = stock_web._run_walk_forward_validation_once(retry_form)
             state.wfv_error = None
+            _remember_state(state)
             return "walk-forward"
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}\n\n{traceback.format_exc(limit=3)}"
