@@ -220,6 +220,48 @@ class _WalkForwardContext:
 
 
 _RETURN_PERIOD_LABELS = ("3Y", "1Y", "6M", "1M", "YTD", "MTD", "WTD", "20D", "60D")
+_MODEL_FEATURE_LOOKBACK_ROWS = 60
+_FORECAST_BASE_TRAIN_ROWS = 200
+_FORECAST_BASE_VALIDATION_ROWS = 30
+_MODEL_START_BUFFER_ROWS = 30
+
+
+def _business_start_date_for_rows(required_rows: int) -> str:
+    rows = max(int(required_rows), 80)
+    today = pd.Timestamp.today().normalize()
+    return pd.bdate_range(end=today, periods=rows)[0].strftime("%Y-%m-%d")
+
+
+def recommended_forecast_start_date(forecast_horizon: int = 10) -> str:
+    horizon = max(int(forecast_horizon or 10), 1)
+    required_rows = (
+        _MODEL_FEATURE_LOOKBACK_ROWS
+        + horizon
+        + _FORECAST_BASE_TRAIN_ROWS
+        + max(_FORECAST_BASE_VALIDATION_ROWS, horizon)
+        + _MODEL_START_BUFFER_ROWS
+    )
+    return _business_start_date_for_rows(required_rows)
+
+
+def recommended_walk_forward_start_date(
+    forecast_horizon: int = 10,
+    min_train_rows: int = 252,
+    step_size: int = 21,
+    max_splits: int = 4,
+) -> str:
+    horizon = max(int(forecast_horizon or 10), 1)
+    train_rows = max(int(min_train_rows or 252), 80)
+    step = max(int(step_size or 21), 1)
+    splits = max(int(max_splits or 4), 1)
+    required_rows = (
+        _MODEL_FEATURE_LOOKBACK_ROWS
+        + horizon
+        + train_rows
+        + step * max(0, splits - 1)
+        + _MODEL_START_BUFFER_ROWS
+    )
+    return _business_start_date_for_rows(required_rows)
 
 
 def _format_pct(value: object, ndigits: int = 2) -> str:
@@ -4051,14 +4093,15 @@ def _html_page(
     is_sub_page: bool = False,
     enable_technical_page: bool = False,
 ) -> str:
+    forecast_horizon = form.get("forecast_horizon", "10")
     use_sample_checked = "checked" if form.get("use_sample", "") == "on" else ""
     auto_save_checked = "checked" if form.get("auto_save", "on") == "on" else ""
     insecure_ssl_checked = "checked" if form.get("insecure_ssl", "") == "on" else ""
     defaults = {
         "ticker": form.get("ticker", ""),
-        "forecast_horizon": form.get("forecast_horizon", "10"),
+        "forecast_horizon": forecast_horizon,
         "history_years": form.get("history_years", "8"),
-        "start_date": form.get("start_date", "2025-12-31"),
+        "start_date": form.get("start_date") or recommended_forecast_start_date(int(forecast_horizon or 10)),
         "end_date": form.get("end_date", datetime.utcnow().strftime("%Y-%m-%d")),
         "output_dir": form.get("output_dir", "outputs/stock_forecast"),
         "prices_csv_path": form.get("prices_csv_path", ""),
@@ -4186,15 +4229,25 @@ def _html_walk_forward_page(
     is_sub_page: bool = False,
     ticker_note_error: bool = False,
 ) -> str:
+    forecast_horizon = form.get("forecast_horizon", "10")
+    min_train_rows = form.get("wf_min_train_rows", "252")
+    step_size = form.get("wf_step_size", "21")
+    max_splits = form.get("wf_max_splits", "4")
     defaults = {
         "ticker": form.get("ticker", ""),
-        "forecast_horizon": form.get("forecast_horizon", "10"),
+        "forecast_horizon": forecast_horizon,
         "history_years": form.get("history_years", "8"),
-        "start_date": form.get("start_date", "2025-12-31"),
+        "start_date": form.get("start_date")
+        or recommended_walk_forward_start_date(
+            int(forecast_horizon or 10),
+            int(min_train_rows or 252),
+            int(step_size or 21),
+            int(max_splits or 4),
+        ),
         "end_date": form.get("end_date", datetime.utcnow().strftime("%Y-%m-%d")),
-        "wf_min_train_rows": form.get("wf_min_train_rows", "252"),
-        "wf_step_size": form.get("wf_step_size", "21"),
-        "wf_max_splits": form.get("wf_max_splits", "4"),
+        "wf_min_train_rows": min_train_rows,
+        "wf_step_size": step_size,
+        "wf_max_splits": max_splits,
         "output_dir": form.get("output_dir", "outputs/walk_forward_validation"),
         "prices_csv_path": form.get("prices_csv_path", ""),
         "ca_bundle_path": form.get("ca_bundle_path", ""),
@@ -5416,7 +5469,7 @@ def launch_stock_forecast_web_gui(
             "ticker": "",
             "forecast_horizon": "10",
             "history_years": "8",
-            "start_date": "2025-12-31",
+            "start_date": recommended_forecast_start_date(10),
             "end_date": datetime.utcnow().strftime("%Y-%m-%d"),
             "output_dir": "outputs/stock_forecast",
             "prices_csv_path": "",
@@ -5476,7 +5529,7 @@ def launch_stock_forecast_web_gui(
             "ticker": "",
             "forecast_horizon": "10",
             "history_years": "8",
-            "start_date": "2025-12-31",
+            "start_date": recommended_walk_forward_start_date(10, 252, 21, 4),
             "end_date": datetime.utcnow().strftime("%Y-%m-%d"),
             "wf_min_train_rows": "252",
             "wf_step_size": "21",

@@ -39,7 +39,7 @@ class StockState:
             "ticker": "005930",
             "forecast_horizon": "10",
             "history_years": "8",
-            "start_date": "2025-12-31",
+            "start_date": stock_web.recommended_forecast_start_date(10),
             "end_date": datetime.utcnow().strftime("%Y-%m-%d"),
             "output_dir": "outputs/stock_forecast",
             "prices_csv_path": "",
@@ -92,7 +92,7 @@ class StockState:
             "ticker": "005930",
             "forecast_horizon": "10",
             "history_years": "8",
-            "start_date": "2025-12-31",
+            "start_date": stock_web.recommended_walk_forward_start_date(10, 252, 21, 4),
             "end_date": datetime.utcnow().strftime("%Y-%m-%d"),
             "wf_min_train_rows": "252",
             "wf_step_size": "21",
@@ -109,10 +109,36 @@ class StockState:
     wfv_error: str | None = None
 
 
+def _int_form_value(form: dict[str, str], key: str, default: int) -> int:
+    try:
+        return int(str(form.get(key, default) or default))
+    except Exception:
+        return default
+
+
+def _should_replace_start_date(value: object) -> bool:
+    return str(value or "").strip() in {"", "2025-12-31"}
+
+
+def _migrate_recommended_start_dates(state: StockState) -> None:
+    if _should_replace_start_date(state.forecast_form.get("start_date")):
+        state.forecast_form["start_date"] = stock_web.recommended_forecast_start_date(
+            _int_form_value(state.forecast_form, "forecast_horizon", 10)
+        )
+    if _should_replace_start_date(state.wfv_form.get("start_date")):
+        state.wfv_form["start_date"] = stock_web.recommended_walk_forward_start_date(
+            _int_form_value(state.wfv_form, "forecast_horizon", 10),
+            _int_form_value(state.wfv_form, "wf_min_train_rows", 252),
+            _int_form_value(state.wfv_form, "wf_step_size", 21),
+            _int_form_value(state.wfv_form, "wf_max_splits", 4),
+        )
+
+
 _states: dict[str, StockState] = {}
 _global_state = load_pickle("stock_last_state.pkl", StockState())
 if not isinstance(_global_state, StockState):
     _global_state = StockState()
+_migrate_recommended_start_dates(_global_state)
 _states_lock = threading.RLock()
 
 
@@ -149,6 +175,7 @@ def _copy_state(source: StockState) -> StockState:
         "wfv_error",
     ):
         setattr(copied, attr, getattr(source, attr))
+    _migrate_recommended_start_dates(copied)
     return copied
 
 
