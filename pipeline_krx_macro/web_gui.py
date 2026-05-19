@@ -549,11 +549,12 @@ def render_body(
       }}
       body {{ background: var(--bg); color: var(--text); }}
       .service-main {{ color: var(--text); }}
+      .service-brand {{ color: #111827; }}
       .service-nav a {{ color: #111827; border-color: var(--line); }}
       .service-nav a.active {{ background: #111827; color: #fff; border-color: #111827; }}
       .macro-nav {{ display:flex; gap:8px; flex-wrap:wrap; margin-bottom:12px; }}
       .macro-nav a {{ text-decoration:none; color:#111827; border:1px solid var(--line); background:#fff; border-radius:999px; padding:7px 12px; font-size:13px; }}
-      .macro-nav a.active {{ background:#111827; color:#fff; border-color:#111827; }}
+      .macro-nav a.active {{ background:var(--brand); color:#fff; border-color:var(--brand); }}
       .service-main > .macro-nav:first-of-type {{ display:none; }}
       .macro-hero {{ display:flex; justify-content:space-between; gap:16px; align-items:flex-start; background:none; border:none; border-radius:8px; padding:18px 18px 8px; margin-bottom:4px; }}
       .macro-hero h1 {{ margin:4px 0 8px; font-size:26px; letter-spacing:0; }}

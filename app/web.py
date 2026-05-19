@@ -1,8 +1,21 @@
 from __future__ import annotations
 
+import csv
 import html
+import os
+import re
+import sqlite3
+import threading
+from pathlib import Path
+
+from bs4 import BeautifulSoup
 
 from app.settings import settings
+
+
+_TICKER_CODE_RE = re.compile(r"^\d{6}$")
+_COMPANY_MAP_LOCK = threading.RLock()
+_COMPANY_MAP: dict[str, str] | None = None
 
 
 def rewrite_links(page: str, replacements: dict[str, str]) -> str:
@@ -10,6 +23,201 @@ def rewrite_links(page: str, replacements: dict[str, str]) -> str:
     for old, new in replacements.items():
         out = out.replace(old, new)
     return out
+
+
+def _company_name_map() -> dict[str, str]:
+    global _COMPANY_MAP
+    with _COMPANY_MAP_LOCK:
+        if _COMPANY_MAP is not None:
+            return _COMPANY_MAP
+        out: dict[str, str] = {}
+        sqlite_candidates = [
+            os.getenv("KRX_SHARED_PRICES_SQLITE_PATH", "").strip(),
+            os.getenv("KRX_SHARED_SQLITE_PATH", "").strip(),
+            "data/krx_shared_db/krx_shared_prices.sqlite",
+        ]
+        for raw_path in sqlite_candidates:
+            if not raw_path:
+                continue
+            path = Path(raw_path)
+            if not path.is_file():
+                continue
+            try:
+                conn = sqlite3.connect(str(path))
+                try:
+                    rows = conn.execute(
+                        "SELECT symbol, COALESCE(name_kr, ''), COALESCE(name_en, '') FROM securities"
+                    ).fetchall()
+                finally:
+                    conn.close()
+                for symbol, name_kr, name_en in rows:
+                    code = str(symbol or "").strip().upper()
+                    name = str(name_kr or name_en or "").strip()
+                    if _TICKER_CODE_RE.match(code) and name and name != code:
+                        out[code] = name
+                if out:
+                    break
+            except Exception:
+                continue
+
+        if not out:
+            for raw_path in [
+                os.getenv("KRX_COMPONENTS_CSV_PATH", "").strip(),
+                "data/krx_components_full.csv",
+                "data/krx_components.csv",
+            ]:
+                if not raw_path:
+                    continue
+                path = Path(raw_path)
+                if not path.is_file():
+                    continue
+                try:
+                    with path.open("r", encoding="utf-8-sig", newline="") as fh:
+                        for row in csv.DictReader(fh):
+                            code = str(row.get("Symbol") or row.get("symbol") or "").strip().upper()
+                            name = str(
+                                row.get("Name")
+                                or row.get("name")
+                                or row.get("name_kr")
+                                or row.get("NameKr")
+                                or row.get("종목명")
+                                or ""
+                            ).strip()
+                            if _TICKER_CODE_RE.match(code) and name and name != code:
+                                out[code] = name
+                    if out:
+                        break
+                except Exception:
+                    continue
+        _COMPANY_MAP = out
+        return _COMPANY_MAP
+
+
+def inject_ticker_tooltips(page: str) -> str:
+    marker = "data-ticker-company-tooltip"
+    if marker in page:
+        return page
+    company_map = _company_name_map()
+    if not company_map:
+        return page
+
+    try:
+        soup = BeautifulSoup(page, "html.parser")
+    except Exception:
+        return page
+
+    for cell in soup.find_all(["td", "th"]):
+        if cell.find(attrs={"data-ticker-company": True}) is not None:
+            continue
+        text = cell.get_text(strip=True)
+        if not _TICKER_CODE_RE.match(text):
+            continue
+        company = company_map.get(text)
+        if not company:
+            continue
+        cell["data-ticker-company"] = company
+        existing_class = cell.get("class") or []
+        if isinstance(existing_class, str):
+            existing_class = existing_class.split()
+        if "ticker-company-tip" not in existing_class:
+            cell["class"] = [*existing_class, "ticker-company-tip"]
+        cell["title"] = company
+
+    tooltip_style = """
+  <style data-ticker-company-tooltip>
+    [data-ticker-company] {
+      cursor: help;
+      text-decoration: underline dotted rgba(17, 24, 39, 0.32);
+      text-underline-offset: 3px;
+    }
+    .ticker-company-tooltip {
+      position: fixed;
+      left: 0;
+      top: 0;
+      z-index: 10000;
+      max-width: min(320px, calc(100vw - 24px));
+      padding: 7px 10px;
+      border-radius: 8px;
+      background: rgba(17, 24, 39, 0.95);
+      color: #fff;
+      border: 1px solid rgba(255, 255, 255, 0.16);
+      box-shadow: 0 14px 28px rgba(15, 23, 42, 0.22);
+      font: 12px/1.35 "Segoe UI", "Noto Sans KR", sans-serif;
+      pointer-events: none;
+      opacity: 0;
+      transform: translate3d(-9999px, -9999px, 0);
+      transition: opacity 100ms ease;
+      white-space: nowrap;
+    }
+    .ticker-company-tooltip.is-visible {
+      opacity: 1;
+    }
+  </style>
+"""
+    tooltip_script = """
+  <div class="ticker-company-tooltip" id="ticker-company-tooltip" aria-hidden="true"></div>
+  <script data-ticker-company-tooltip>
+    (() => {
+      const tooltip = document.getElementById("ticker-company-tooltip");
+      if (!tooltip) return;
+
+      const position = (event) => {
+        const rect = tooltip.getBoundingClientRect();
+        const offsetX = 14;
+        const offsetY = 18;
+        const maxX = Math.max(window.innerWidth - rect.width - 12, 12);
+        const maxY = Math.max(window.innerHeight - rect.height - 12, 12);
+        const x = Math.min(Math.max(event.clientX + offsetX, 12), maxX);
+        const y = Math.min(Math.max(event.clientY + offsetY, 12), maxY);
+        tooltip.style.transform = `translate3d(${x}px, ${y}px, 0)`;
+      };
+
+      const show = (target, event) => {
+        const company = target.getAttribute("data-ticker-company");
+        if (!company) return;
+        tooltip.textContent = company;
+        tooltip.classList.add("is-visible");
+        tooltip.setAttribute("aria-hidden", "false");
+        position(event);
+      };
+
+      const hide = () => {
+        tooltip.classList.remove("is-visible");
+        tooltip.setAttribute("aria-hidden", "true");
+        tooltip.style.transform = "translate3d(-9999px, -9999px, 0)";
+      };
+
+      document.addEventListener("mouseover", (event) => {
+        const target = event.target instanceof Element ? event.target.closest("[data-ticker-company]") : null;
+        if (target) show(target, event);
+      });
+      document.addEventListener("mousemove", (event) => {
+        if (tooltip.classList.contains("is-visible")) position(event);
+      }, { passive: true });
+      document.addEventListener("mouseout", (event) => {
+        const target = event.target instanceof Element ? event.target.closest("[data-ticker-company]") : null;
+        if (target && !target.contains(event.relatedTarget)) hide();
+      });
+      document.addEventListener("focusin", (event) => {
+        const target = event.target instanceof Element ? event.target.closest("[data-ticker-company]") : null;
+        if (!target) return;
+        const rect = target.getBoundingClientRect();
+        show(target, { clientX: rect.left, clientY: rect.bottom });
+      });
+      document.addEventListener("focusout", hide);
+      window.addEventListener("pagehide", hide);
+    })();
+  </script>
+"""
+    if soup.head is not None:
+        soup.head.append(BeautifulSoup(tooltip_style, "html.parser"))
+    else:
+        soup.insert(0, BeautifulSoup(tooltip_style, "html.parser"))
+    if soup.body is not None:
+        soup.body.append(BeautifulSoup(tooltip_script, "html.parser"))
+    else:
+        soup.append(BeautifulSoup(tooltip_script, "html.parser"))
+    return str(soup)
 
 
 def _service_nav_html(*, active: str = "", admin: bool = False) -> str:
@@ -113,17 +321,17 @@ def _service_top_markup(*, active: str = "", admin: bool = False) -> str:
 
 def add_service_top_nav(page: str, *, active: str = "", admin: bool = False) -> str:
     if "data-service-top-nav" in page:
-        return page
+        return inject_ticker_tooltips(page)
     css = _service_top_css()
     markup = _service_top_markup(active=active, admin=admin)
     out = page.replace("</head>", css + "\n</head>", 1) if "</head>" in page else css + page
     if "<body>" in out:
-        return out.replace("<body>", "<body>" + markup, 1)
+        return inject_ticker_tooltips(out.replace("<body>", "<body>" + markup, 1))
     if "<body " in out:
         body_end = out.find(">", out.find("<body "))
         if body_end != -1:
-            return out[: body_end + 1] + markup + out[body_end + 1 :]
-    return markup + out
+            return inject_ticker_tooltips(out[: body_end + 1] + markup + out[body_end + 1 :])
+    return inject_ticker_tooltips(markup + out)
 
 
 def inject_busy_cursor_overlay(page: str) -> str:
@@ -349,7 +557,7 @@ def shell(
     start_page_only: bool = False,
 ) -> str:
     default_nav = _service_nav_html(active=active, admin=admin)
-    return inject_busy_cursor_overlay(f"""<!doctype html>
+    return inject_busy_cursor_overlay(inject_ticker_tooltips(f"""<!doctype html>
 <html lang="ko">
 <head>
   <meta charset="utf-8" />
@@ -415,4 +623,4 @@ def shell(
   </main>
 </body>
 </html>
-""")
+"""))
