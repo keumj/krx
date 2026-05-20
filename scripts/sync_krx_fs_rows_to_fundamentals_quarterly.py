@@ -224,9 +224,83 @@ def _transform_report(frame: pd.DataFrame) -> dict[str, object] | None:
             statement_keywords=("현금흐름",),
             account_candidates=("유형자산의 취득", "유형자산 취득", "유형자산의 증가"),
         ),
+        "shares_outstanding": None,
         "diluted_eps": None,
         "source": f"krx_fs_rows:{first.get('source_file')}",
     }
+
+
+def _attach_shares_and_eps(frame: pd.DataFrame, db_path: Path) -> pd.DataFrame:
+    if frame.empty or "symbol" not in frame.columns or "fiscal_date" not in frame.columns:
+        return frame
+
+    out = frame.copy()
+    out["symbol"] = out["symbol"].map(_normalize_symbol)
+    out["fiscal_date"] = pd.to_datetime(out["fiscal_date"], errors="coerce")
+    symbols = sorted({symbol for symbol in out["symbol"].dropna().tolist() if symbol})
+    max_fiscal_date = out["fiscal_date"].dropna().max()
+    if not symbols or pd.isna(max_fiscal_date):
+        out["fiscal_date"] = out["fiscal_date"].dt.strftime("%Y-%m-%d")
+        return out
+
+    placeholders = ",".join("?" for _ in symbols)
+    query = (
+        "SELECT symbol, date, shares_outstanding "
+        "FROM prices "
+        f"WHERE symbol IN ({placeholders}) "
+        "AND date <= ? "
+        "AND shares_outstanding IS NOT NULL "
+        "ORDER BY symbol, date"
+    )
+    params: list[object] = [*symbols, pd.Timestamp(max_fiscal_date).strftime("%Y-%m-%d")]
+    with sqlite3.connect(db_path) as conn:
+        shares = pd.read_sql_query(query, conn, params=params)
+    if shares.empty:
+        out["fiscal_date"] = out["fiscal_date"].dt.strftime("%Y-%m-%d")
+        return out
+
+    shares["symbol"] = shares["symbol"].map(_normalize_symbol)
+    shares["date"] = pd.to_datetime(shares["date"], errors="coerce")
+    shares["shares_outstanding"] = pd.to_numeric(shares["shares_outstanding"], errors="coerce")
+    shares = shares.dropna(subset=["symbol", "date", "shares_outstanding"]).sort_values(["symbol", "date"])
+    if shares.empty:
+        out["fiscal_date"] = out["fiscal_date"].dt.strftime("%Y-%m-%d")
+        return out
+
+    out["_row_order"] = range(len(out.index))
+    merged_parts: list[pd.DataFrame] = []
+    for symbol, sub in out.sort_values(["symbol", "fiscal_date"]).groupby("symbol", sort=False):
+        share_sub = shares[shares["symbol"] == symbol]
+        if share_sub.empty:
+            merged_parts.append(sub)
+            continue
+        merged = pd.merge_asof(
+            sub.sort_values("fiscal_date"),
+            share_sub[["date", "shares_outstanding"]].sort_values("date"),
+            left_on="fiscal_date",
+            right_on="date",
+            direction="backward",
+        ).drop(columns=["date"])
+        merged_parts.append(merged)
+
+    out = pd.concat(merged_parts, axis=0, ignore_index=True).sort_values("_row_order").drop(columns=["_row_order"])
+    if "shares_outstanding_x" in out.columns or "shares_outstanding_y" in out.columns:
+        base = pd.to_numeric(out.get("shares_outstanding_x"), errors="coerce")
+        loaded = pd.to_numeric(out.get("shares_outstanding_y"), errors="coerce")
+        out["shares_outstanding"] = base.combine_first(loaded)
+        out = out.drop(columns=[col for col in ["shares_outstanding_x", "shares_outstanding_y"] if col in out.columns])
+
+    for column in ("shares_outstanding", "net_income", "diluted_eps"):
+        if column not in out.columns:
+            out[column] = np.nan
+
+    shares_outstanding = pd.to_numeric(out.get("shares_outstanding"), errors="coerce")
+    net_income = pd.to_numeric(out.get("net_income"), errors="coerce")
+    existing_eps = pd.to_numeric(out.get("diluted_eps"), errors="coerce")
+    calculated_eps = net_income / shares_outstanding.where(shares_outstanding > 0.0)
+    out["diluted_eps"] = existing_eps.combine_first(calculated_eps)
+    out["fiscal_date"] = out["fiscal_date"].dt.strftime("%Y-%m-%d")
+    return out
 
 
 def _load_raw_rows(db_path: Path, raw_table: str, symbol: str | None, limit_reports: int | None) -> pd.DataFrame:
@@ -376,6 +450,7 @@ def sync_krx_fs_rows_to_fundamentals_quarterly(
             continue
         normalized = pd.DataFrame(rows)
         normalized = normalized.drop_duplicates(subset=["symbol", "fiscal_date", "period_type"], keep="last")
+        normalized = _attach_shares_and_eps(normalized, db_path)
         transformed_rows += int(len(normalized.index))
         changed += upsert_krx_quarterly_fundamentals(normalized, db_path=db_path)
         print(

@@ -9,6 +9,7 @@ from .shared_krx_prices_sql import (
     load_shared_close_prices_for_symbols,
     load_shared_market_caps_for_symbols,
     load_shared_quarterly_fundamentals_for_symbols,
+    load_shared_shares_outstanding_for_symbols,
     shared_prices_sqlite_path,
 )
 
@@ -85,9 +86,17 @@ def derive_shared_fundamental_metrics(
         shared_db_root=shared_db_root,
         db_path=target,
     )
+    shares_history, shares_source = load_shared_shares_outstanding_for_symbols(
+        normalized,
+        start_date=price_start,
+        end_date=price_end,
+        shared_db_root=shared_db_root,
+        db_path=target,
+    )
 
     close_history = close_history if close_history is not None else pd.DataFrame()
     market_caps = market_caps if market_caps is not None else pd.DataFrame()
+    shares_history = shares_history if shares_history is not None else pd.DataFrame()
 
     rows: list[dict[str, object]] = []
     for symbol, sub in quarterly.groupby("symbol", sort=True):
@@ -111,6 +120,8 @@ def derive_shared_fundamental_metrics(
         latest_eps = pd.to_numeric(pd.Series([latest.get("diluted_eps")]), errors="coerce").dropna()
         latest_net_income_value = float(latest_net_income.iloc[0]) if not latest_net_income.empty else np.nan
         latest_eps_value = float(latest_eps.iloc[0]) if not latest_eps.empty else np.nan
+        latest_quarterly_shares = pd.to_numeric(pd.Series([latest.get("shares_outstanding")]), errors="coerce").dropna()
+        latest_quarterly_shares_value = float(latest_quarterly_shares.iloc[0]) if not latest_quarterly_shares.empty else np.nan
 
         price_date = None
         latest_price = np.nan
@@ -124,7 +135,20 @@ def derive_shared_fundamental_metrics(
             market_cap_date, market_cap_value = _last_value_on_or_before(market_caps[symbol], as_of_ts)
             latest_market_cap = market_cap_value if market_cap_value is not None else np.nan
 
-        implied_shares = None
+        shares_date = None
+        latest_shares = latest_quarterly_shares_value
+        if symbol in shares_history.columns:
+            shares_date, latest_shares_value = _last_value_on_or_before(shares_history[symbol], as_of_ts)
+            if latest_shares_value is not None:
+                latest_shares = latest_shares_value
+
+        positive_latest_shares = _safe_positive(latest_shares)
+        if not np.isfinite(ttm_eps) and np.isfinite(ttm_net_income) and positive_latest_shares is not None:
+            ttm_eps = float(ttm_net_income) / float(positive_latest_shares)
+        if not np.isfinite(latest_eps_value) and np.isfinite(latest_net_income_value) and positive_latest_shares is not None:
+            latest_eps_value = float(latest_net_income_value) / float(positive_latest_shares)
+
+        implied_shares = positive_latest_shares
         if np.isfinite(latest_net_income_value) and np.isfinite(latest_eps_value) and latest_eps_value != 0.0:
             implied_shares = abs(float(latest_net_income_value) / float(latest_eps_value))
         elif np.isfinite(ttm_net_income) and np.isfinite(ttm_eps) and float(ttm_eps) != 0.0:
@@ -190,10 +214,12 @@ def derive_shared_fundamental_metrics(
                 "as_of_date": as_of_ts.strftime("%Y-%m-%d"),
                 "price_date": price_date.strftime("%Y-%m-%d") if price_date is not None else None,
                 "market_cap_date": market_cap_date.strftime("%Y-%m-%d") if market_cap_date is not None else None,
+                "shares_date": shares_date.strftime("%Y-%m-%d") if shares_date is not None else None,
                 "latest_fiscal_date": pd.Timestamp(latest["fiscal_date"]).strftime("%Y-%m-%d"),
                 "statement_count": int(len(ordered.index)),
                 "latest_price": latest_price if np.isfinite(latest_price) else np.nan,
                 "market_cap": latest_market_cap if np.isfinite(latest_market_cap) else np.nan,
+                "shares_outstanding": latest_shares if np.isfinite(latest_shares) else np.nan,
                 "ttm_net_income": float(ttm_net_income) if np.isfinite(ttm_net_income) else np.nan,
                 "ttm_eps": float(ttm_eps) if np.isfinite(ttm_eps) else np.nan,
                 "roe": roe if np.isfinite(roe) else np.nan,
@@ -216,6 +242,6 @@ def derive_shared_fundamental_metrics(
         return pd.DataFrame(), "not_available"
 
     frame = pd.DataFrame(rows).sort_values("symbol").reset_index(drop=True)
-    source_parts = [part for part in [quarterly_source, price_source, market_cap_source] if part]
+    source_parts = [part for part in [quarterly_source, price_source, market_cap_source, shares_source] if part]
     source = " | ".join(dict.fromkeys(source_parts)) if source_parts else f"sqlite:{target.as_posix()}"
     return frame, source

@@ -62,6 +62,57 @@ def _normalize_number(value: object) -> float | None:
         return None
 
 
+def _normalized_symbol_filter(symbols: list[str] | tuple[str, ...] | set[str] | None, alias: str) -> tuple[str, list[object]]:
+    if symbols is None:
+        return "", []
+    normalized = sorted({_normalize_symbol(symbol) for symbol in symbols if _normalize_symbol(symbol)})
+    if not normalized:
+        return " AND 1 = 0", []
+    placeholders = ",".join("?" for _ in normalized)
+    return f" AND {alias}.symbol IN ({placeholders})", list(normalized)
+
+
+def _sync_quarterly_shares_and_eps_from_prices(
+    conn: sqlite3.Connection,
+    *,
+    symbols: list[str] | tuple[str, ...] | set[str] | None = None,
+) -> int:
+    symbol_filter, params = _normalized_symbol_filter(symbols, "f")
+    share_lookup = """
+        (
+            SELECT p.shares_outstanding
+            FROM prices AS p
+            WHERE p.symbol = f.symbol
+              AND p.date <= f.fiscal_date
+              AND p.shares_outstanding IS NOT NULL
+            ORDER BY p.date DESC
+            LIMIT 1
+        )
+    """
+    before = conn.total_changes
+    conn.execute(
+        f"""
+        UPDATE fundamentals_quarterly AS f
+        SET shares_outstanding = {share_lookup}
+        WHERE {share_lookup} IS NOT NULL
+        {symbol_filter}
+        """,
+        params,
+    )
+    conn.execute(
+        f"""
+        UPDATE fundamentals_quarterly AS f
+        SET diluted_eps = net_income / shares_outstanding
+        WHERE net_income IS NOT NULL
+          AND shares_outstanding IS NOT NULL
+          AND shares_outstanding > 0
+        {symbol_filter}
+        """,
+        params,
+    )
+    return int(conn.total_changes - before)
+
+
 def _resolve_shared_root(shared_db_root: Path | str | None = None) -> Path:
     if shared_db_root is None:
         explicit_root = str(os.getenv("KEUMJ_KRX_DB_DIR", "")).strip()
@@ -176,6 +227,7 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             operating_cash_flow REAL,
             free_cash_flow REAL,
             capex REAL,
+            shares_outstanding REAL,
             diluted_eps REAL,
             source TEXT NOT NULL DEFAULT 'unknown',
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -265,7 +317,7 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_fund_snapshot_as_of_date ON fundamentals_snapshot(as_of_date)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_fund_quarterly_symbol_date ON fundamentals_quarterly(symbol, fiscal_date)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_fund_quarterly_fiscal_date ON fundamentals_quarterly(fiscal_date)")
-    for column_name in ("current_assets", "current_liabilities", "total_debt"):
+    for column_name in ("current_assets", "current_liabilities", "total_debt", "shares_outstanding"):
         existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(fundamentals_quarterly)")}
         if column_name not in existing_cols:
             conn.execute(f"ALTER TABLE fundamentals_quarterly ADD COLUMN {column_name} REAL")
@@ -609,8 +661,10 @@ def upsert_krx_prices(
             """,
             rows,
         )
+        stored = int(conn.total_changes - before)
+        _sync_quarterly_shares_and_eps_from_prices(conn, symbols=[str(row[0]) for row in rows])
         conn.commit()
-        return int(conn.total_changes - before)
+        return stored
 
 
 def upsert_krx_quarterly_fundamentals(
@@ -654,6 +708,7 @@ def upsert_krx_quarterly_fundamentals(
                 _normalize_number(record.get(cols.get("operating_cash_flow"))),
                 _normalize_number(record.get(cols.get("free_cash_flow"))),
                 _normalize_number(record.get(cols.get("capex"))),
+                _normalize_number(record.get(cols.get("shares_outstanding"))),
                 _normalize_number(record.get(cols.get("diluted_eps"))),
                 _normalize_text(record.get(cols.get("source"))) or "unknown",
             )
@@ -670,9 +725,9 @@ def upsert_krx_quarterly_fundamentals(
             INSERT INTO fundamentals_quarterly(
                 symbol, fiscal_date, filing_date, period_type, revenue, operating_income, net_income,
                 total_assets, total_liabilities, stockholders_equity, current_assets, current_liabilities,
-                total_debt, operating_cash_flow, free_cash_flow, capex, diluted_eps, source
+                total_debt, operating_cash_flow, free_cash_flow, capex, shares_outstanding, diluted_eps, source
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(symbol, fiscal_date, period_type) DO UPDATE SET
                 filing_date=COALESCE(excluded.filing_date, fundamentals_quarterly.filing_date),
                 revenue=excluded.revenue,
@@ -687,14 +742,33 @@ def upsert_krx_quarterly_fundamentals(
                 operating_cash_flow=excluded.operating_cash_flow,
                 free_cash_flow=excluded.free_cash_flow,
                 capex=excluded.capex,
+                shares_outstanding=excluded.shares_outstanding,
                 diluted_eps=excluded.diluted_eps,
                 source=excluded.source,
                 updated_at=CURRENT_TIMESTAMP
             """,
             rows,
         )
+        stored = int(conn.total_changes - before)
+        _sync_quarterly_shares_and_eps_from_prices(conn, symbols=[str(row[0]) for row in rows])
         conn.commit()
-        return int(conn.total_changes - before)
+        return stored
+
+
+def sync_krx_quarterly_shares_and_eps_from_prices(
+    *,
+    symbols: list[str] | tuple[str, ...] | set[str] | None = None,
+    db_path: Path | str | None = None,
+    shared_db_root: Path | str | None = None,
+) -> int:
+    target = Path(db_path) if db_path is not None else krx_prices_sqlite_path(shared_db_root)
+    if not target.exists() or not target.is_file():
+        return 0
+    with _connect(target) as conn:
+        _ensure_schema(conn)
+        changed = _sync_quarterly_shares_and_eps_from_prices(conn, symbols=symbols)
+        conn.commit()
+        return changed
 
 
 def upsert_krx_benchmark_snapshot(

@@ -382,7 +382,7 @@ class _RunContext:
 
 @dataclass
 class _CachedData:
-    key: tuple[str, bool, bool, str, bool]
+    key: tuple[str, bool]
     df: pd.DataFrame
     source: str
 
@@ -1130,19 +1130,13 @@ def _run_analysis(
     key = (ticker_final, use_sample)
 
     source_notice: str | None = None
-    cache_out: _CachedData | None = cache
-
-    if cache is not None and cache.key == key:
-        df = cache.df.copy()
-        source = cache.source
-    else:
-        df, source = _fetch_ohlcv_data(
-            ticker=ticker_final,
-            use_sample=use_sample,
-        )
-        if source == "cache":
-            source_notice = "Loaded from local OHLCV cache (already up-to-date for latest business day)."
-        cache_out = _CachedData(key=key, df=df.copy(), source=source)
+    df, source = _fetch_ohlcv_data(
+        ticker=ticker_final,
+        use_sample=use_sample,
+    )
+    if source == "cache":
+        source_notice = "Loaded from local OHLCV cache (already up-to-date for latest business day)."
+    cache_out: _CachedData | None = _CachedData(key=key, df=df.copy(), source=source)
 
     chart_bytes: list[tuple[str, bytes]] = []
     if action in {"ma", "all"}:

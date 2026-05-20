@@ -910,15 +910,15 @@ def _optimization_page(ctx: _PageContext) -> str:
 _REFRESH_JOB_DEFS: list[dict[str, str]] = [
     {
         "job_id": "stock",
-        "label": "KRX 가격/시총",
-        "description": "KRX 가격 패널, 시가총액 CSV, shared SQLite 가격 테이블을 갱신합니다.",
+        "label": "KRX 가격/시총/주식수",
+        "description": "KRX 가격 패널, 시가총액 CSV, 주식수 CSV, shared SQLite 가격 테이블과 EPS 보정을 갱신합니다.",
         "module": "pipeline_common.refresh_krx_shared_prices",
-        "button_label": "가격/시총 갱신",
+        "button_label": "가격/시총/주식수 갱신",
     },
     {
         "job_id": "quarterly",
         "label": "분기 재무",
-        "description": "shared SQLite의 fundamentals_quarterly 테이블을 최신 분기 기준으로 채웁니다.",
+        "description": "shared SQLite의 fundamentals_quarterly 테이블을 최신 분기 기준으로 채우고 주식수 기반 EPS를 갱신합니다.",
         "module": "pipeline_krx.refresh_dart_auto_fundamentals",
         "button_label": "분기 재무 갱신",
     },

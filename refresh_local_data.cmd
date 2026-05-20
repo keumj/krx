@@ -41,8 +41,8 @@ echo  This updates local data files only.
 echo.
 echo  Python: %PYTHON_EXE%
 echo.
-echo  [1] Refresh KRX prices / market caps / shared SQLite
-echo  [2] Refresh KRX DART quarterly fundamentals in shared SQLite
+echo  [1] Refresh KRX prices / market caps / shares / shared SQLite ^(+ EPS backfill^)
+echo  [2] Refresh KRX DART quarterly fundamentals in shared SQLite ^(+ shares/EPS sync^)
 echo  [3] Refresh KRX news incrementally ^(Naver + Google low-coverage supplement^)
 echo  [4] Refresh KRX macro market/FRED data in macro SQLite
 echo  [5] Run latest-data refresh jobs ^(without news^)

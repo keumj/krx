@@ -8,9 +8,6 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from pipeline_krx_macro.macro_data_store import connect_macro_readonly
-
-
 def _query(conn: sqlite3.Connection, query: str) -> tuple[object, ...] | None:
     try:
         return conn.execute(query).fetchone()
@@ -26,12 +23,24 @@ def _print_stock(conn: sqlite3.Connection) -> None:
     row = _query(conn, "SELECT MAX(date), COUNT(*) FROM prices WHERE market_cap IS NOT NULL")
     if row:
         print(f"market_caps_in_prices: max_date={row[0] or '-'} rows={row[1] or 0}")
+    row = _query(conn, "SELECT MAX(date), COUNT(*) FROM prices WHERE shares_outstanding IS NOT NULL")
+    if row:
+        print(f"shares_in_prices: max_date={row[0] or '-'} rows={row[1] or 0}")
 
 
 def _print_quarterly(conn: sqlite3.Connection) -> None:
     row = _query(conn, "SELECT MAX(fiscal_date), COUNT(*), COUNT(DISTINCT symbol) FROM fundamentals_quarterly")
     if row:
         print(f"fundamentals_quarterly: max_fiscal_date={row[0] or '-'} rows={row[1] or 0} symbols={row[2] or 0}")
+    row = _query(
+        conn,
+        "SELECT COUNT(*) FROM fundamentals_quarterly WHERE shares_outstanding IS NOT NULL",
+    )
+    if row:
+        print(f"fundamentals_quarterly_shares: rows={row[0] or 0}")
+    row = _query(conn, "SELECT COUNT(*) FROM fundamentals_quarterly WHERE diluted_eps IS NOT NULL")
+    if row:
+        print(f"fundamentals_quarterly_eps: rows={row[0] or 0}")
 
 
 def _print_news(conn: sqlite3.Connection) -> None:
@@ -41,6 +50,8 @@ def _print_news(conn: sqlite3.Connection) -> None:
 
 
 def _print_macro() -> int:
+    from pipeline_krx_macro.macro_data_store import connect_macro_readonly
+
     db_path = Path.cwd() / "data" / "macro_prices.sqlite"
     print(f"macro_sqlite={db_path}")
     print(f"sqlite_exists={db_path.exists()} size_bytes={db_path.stat().st_size if db_path.exists() else 0}")

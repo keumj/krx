@@ -71,7 +71,7 @@ class _FinancialContext:
     summary_table: pd.DataFrame
     income_table: pd.DataFrame
     balance_table: pd.DataFrame
-    cashflow_table: pd.DataFrame
+    health_table: pd.DataFrame
     raw_fs_table: pd.DataFrame
     saved_dir: str | None
     source_table: pd.DataFrame
@@ -3165,6 +3165,78 @@ def _format_fin_value(value: object) -> str:
     return str(value)
 
 
+FINANCIAL_TABLE_UNIT_DIVISOR = 1_000_000_000.0
+
+
+def _format_billion_krw_value(value: object) -> str:
+    try:
+        numeric = float(value)
+    except Exception:
+        return "-" if value in (None, "") else str(value)
+    if not np.isfinite(numeric):
+        return "-"
+    scaled = numeric / FINANCIAL_TABLE_UNIT_DIVISOR
+    if abs(scaled) >= 100:
+        return f"{scaled:,.0f}"
+    return f"{scaled:,.1f}"
+
+
+def _is_per_share_line_item(value: object) -> bool:
+    text = str(value or "").upper()
+    return "EPS" in text or "주당" in text
+
+
+def _financial_statement_display_table(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+    out = df.copy()
+    line_col = "line_item" if "line_item" in out.columns else None
+    for col in out.columns:
+        if col == line_col:
+            continue
+        if col == "amount":
+            out[col] = out[col].map(_format_billion_krw_value)
+            continue
+        numeric = pd.to_numeric(out[col], errors="coerce")
+        if numeric.notna().any():
+            formatted: list[str] = []
+            for idx, value in out[col].items():
+                line_item = out.at[idx, line_col] if line_col else ""
+                if _is_per_share_line_item(line_item):
+                    formatted.append(_format_fin_value(value))
+                else:
+                    formatted.append(_format_billion_krw_value(value))
+            out[col] = formatted
+    return out
+
+
+def _summary_display_table(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty or not {"line_item", "latest_value"}.issubset(df.columns):
+        return df
+    out = df.copy()
+    out["latest_value"] = [
+        _format_fin_value(value) if _is_per_share_line_item(line_item) else _format_billion_krw_value(value)
+        for line_item, value in zip(out["line_item"], out["latest_value"])
+    ]
+    return out
+
+
+def _financial_context_health_table(ctx: object) -> pd.DataFrame:
+    health = getattr(ctx, "health_table", None)
+    if isinstance(health, pd.DataFrame) and not health.empty:
+        return health
+
+    ticker = str(getattr(ctx, "ticker", "") or "").strip().upper()
+    if ticker:
+        try:
+            quarterly, _ = load_shared_quarterly_fundamentals_for_symbols([ticker], limit_per_symbol=4)
+            if quarterly is not None and not quarterly.empty:
+                return _quarterly_health_table(quarterly, 4)
+        except Exception:
+            pass
+    return pd.DataFrame()
+
+
 def _short_error_message(exc: Exception) -> str:
     msg = " ".join(str(exc).split())
     if not msg:
@@ -3524,6 +3596,68 @@ def _quarterly_statement_table(quarterly: pd.DataFrame, row_map: dict[str, str],
     return pd.DataFrame(rows)
 
 
+def _quarterly_health_table(quarterly: pd.DataFrame, periods: int) -> pd.DataFrame:
+    if quarterly is None or quarterly.empty:
+        return pd.DataFrame()
+    frame = quarterly.copy()
+    frame["fiscal_date"] = pd.to_datetime(frame["fiscal_date"], errors="coerce")
+    frame = frame.dropna(subset=["fiscal_date"]).sort_values("fiscal_date", ascending=False).head(periods)
+    if frame.empty:
+        return pd.DataFrame()
+
+    rows: list[dict[str, object]] = [
+        {"line_item": "Current Assets"},
+        {"line_item": "Current Liabilities"},
+        {"line_item": "Total Liabilities"},
+        {"line_item": "Current Ratio"},
+        {"line_item": "Debt Ratio (%)"},
+        {"line_item": "Equity Ratio (%)"},
+        {"line_item": "Debt to Equity (%)"},
+    ]
+    for _, item in frame.iterrows():
+        period = pd.Timestamp(item["fiscal_date"]).strftime("%Y-%m-%d")
+        current_assets = _safe_float(item.get("current_assets"))
+        current_liabilities = _safe_float(item.get("current_liabilities"))
+        total_assets = _safe_float(item.get("total_assets"))
+        total_liabilities = _safe_float(item.get("total_liabilities"))
+        equity = _safe_float(item.get("stockholders_equity"))
+
+        values = [
+            _format_billion_krw_value(current_assets),
+            _format_billion_krw_value(current_liabilities),
+            _format_billion_krw_value(total_liabilities),
+            _format_fin_value(
+                current_assets / current_liabilities
+                if current_assets is not None and current_liabilities not in (None, 0)
+                else None
+            ),
+            _format_fin_value(
+                (total_liabilities / total_assets) * 100.0
+                if total_liabilities is not None and total_assets not in (None, 0)
+                else None
+            ),
+            _format_fin_value(
+                (equity / total_assets) * 100.0 if equity is not None and total_assets not in (None, 0) else None
+            ),
+            _format_fin_value(
+                (total_liabilities / equity) * 100.0
+                if total_liabilities is not None and equity not in (None, 0)
+                else None
+            ),
+        ]
+        for row, value in zip(rows, values):
+            row[period] = value
+    return pd.DataFrame(rows)
+
+
+def _safe_float(value: object) -> float | None:
+    try:
+        numeric = float(value)
+    except Exception:
+        return None
+    return numeric if np.isfinite(numeric) else None
+
+
 def _contains_any(value: object, needles: tuple[str, ...]) -> bool:
     text = str(value or "")
     return any(needle in text for needle in needles)
@@ -3677,6 +3811,16 @@ def _coalesce_fin_value(primary: object, fallback: object) -> object:
     return fallback
 
 
+def _statement_values_empty(frame: pd.DataFrame) -> bool:
+    if frame is None or frame.empty:
+        return True
+    value_cols = [col for col in frame.columns if col != "line_item"]
+    if not value_cols:
+        return True
+    numeric = frame[value_cols].apply(pd.to_numeric, errors="coerce")
+    return not numeric.notna().any().any()
+
+
 def _build_financial_context_krx(
     *,
     ticker: str,
@@ -3768,12 +3912,24 @@ def _build_financial_context_krx(
     )
     latest_equity = latest_equity if latest_equity is not None else raw_equity
 
+    trailing_per = (
+        latest_price / float(ttm_eps)
+        if latest_price is not None and np.isfinite(ttm_eps) and float(ttm_eps) != 0
+        else None
+    )
+    if trailing_per is None and market_cap is not None and np.isfinite(ttm_net_income) and float(ttm_net_income) > 0:
+        trailing_per = float(market_cap) / float(ttm_net_income)
+
+    trailing_eps = float(ttm_eps) if np.isfinite(ttm_eps) else None
+    if trailing_eps is None and latest_price is not None and trailing_per not in (None, 0):
+        trailing_eps = float(latest_price) / float(trailing_per)
+
     metrics = {
         "Market Cap": market_cap,
-        "PER (Trailing)": (latest_price / float(ttm_eps)) if latest_price is not None and np.isfinite(ttm_eps) and float(ttm_eps) != 0 else None,
+        "PER (Trailing)": trailing_per,
         "PER (Forward)": None,
         "PBR": (market_cap / latest_equity) if market_cap is not None and latest_equity not in (None, 0) else None,
-        "EPS (Trailing)": float(ttm_eps) if np.isfinite(ttm_eps) else None,
+        "EPS (Trailing)": trailing_eps,
         "ROE": (float(ttm_net_income) / float(average_equity)) if np.isfinite(ttm_net_income) and np.isfinite(average_equity) and float(average_equity) != 0 else None,
         "Debt/Equity": ((latest_debt / latest_equity) * 100.0) if latest_debt is not None and latest_equity not in (None, 0) else None,
         "Current Ratio": (current_assets / current_liabilities) if current_assets is not None and current_liabilities not in (None, 0) else None,
@@ -3797,48 +3953,33 @@ def _build_financial_context_krx(
             "Total Assets": "total_assets",
             "Total Liabilities": "total_liabilities",
             "Stockholders Equity": "stockholders_equity",
-            "Total Debt": "total_debt",
         },
         periods,
     )
-    cashflow_table = _quarterly_statement_table(
-        quarterly,
-        {
-            "Operating Cash Flow": "operating_cash_flow",
-            "Free Cash Flow": "free_cash_flow",
-            "Capital Expenditure": "capex",
-        },
-        periods,
-    )
-    if income_table.empty:
+    health_table = _quarterly_health_table(quarterly, periods)
+    if _statement_values_empty(income_table):
         income_table = _raw_fs_statement_table(
             raw_fs,
             statement_keywords=("손익", "포괄손익"),
             periods=periods,
         )
-    if balance_table.empty:
+    if _statement_values_empty(balance_table):
         balance_table = _raw_fs_statement_table(
             raw_fs,
             statement_keywords=("재무상태",),
             periods=periods,
         )
-    if cashflow_table.empty:
-        cashflow_table = _raw_fs_statement_table(
-            raw_fs,
-            statement_keywords=("현금흐름",),
-            periods=periods,
-        )
     raw_fs_table = _raw_fs_recent_table(raw_fs, periods=periods)
     summary_table = pd.DataFrame(
         [
-            {"line_item": "Revenue", "latest_value": _format_fin_value(_coalesce_fin_value(latest.get("revenue") if not latest.empty else None, raw_revenue))},
-            {"line_item": "Operating Income", "latest_value": _format_fin_value(_coalesce_fin_value(latest.get("operating_income") if not latest.empty else None, raw_operating_income))},
-            {"line_item": "Net Income", "latest_value": _format_fin_value(_coalesce_fin_value(latest.get("net_income") if not latest.empty else None, raw_net_income))},
-            {"line_item": "Total Assets", "latest_value": _format_fin_value(_coalesce_fin_value(latest.get("total_assets") if not latest.empty else None, raw_total_assets))},
-            {"line_item": "Total Liabilities", "latest_value": _format_fin_value(_coalesce_fin_value(latest.get("total_liabilities") if not latest.empty else None, raw_total_liabilities))},
-            {"line_item": "Stockholders Equity", "latest_value": _format_fin_value(_coalesce_fin_value(latest.get("stockholders_equity") if not latest.empty else None, raw_equity))},
-            {"line_item": "Operating Cash Flow", "latest_value": _format_fin_value(_coalesce_fin_value(latest.get("operating_cash_flow") if not latest.empty else None, raw_operating_cash_flow))},
-            {"line_item": "Free Cash Flow", "latest_value": _format_fin_value(latest.get("free_cash_flow"))},
+            {"line_item": "Revenue", "latest_value": _coalesce_fin_value(latest.get("revenue") if not latest.empty else None, raw_revenue)},
+            {"line_item": "Operating Income", "latest_value": _coalesce_fin_value(latest.get("operating_income") if not latest.empty else None, raw_operating_income)},
+            {"line_item": "Net Income", "latest_value": _coalesce_fin_value(latest.get("net_income") if not latest.empty else None, raw_net_income)},
+            {"line_item": "Total Assets", "latest_value": _coalesce_fin_value(latest.get("total_assets") if not latest.empty else None, raw_total_assets)},
+            {"line_item": "Total Liabilities", "latest_value": _coalesce_fin_value(latest.get("total_liabilities") if not latest.empty else None, raw_total_liabilities)},
+            {"line_item": "Stockholders Equity", "latest_value": _coalesce_fin_value(latest.get("stockholders_equity") if not latest.empty else None, raw_equity)},
+            {"line_item": "Operating Cash Flow", "latest_value": _coalesce_fin_value(latest.get("operating_cash_flow") if not latest.empty else None, raw_operating_cash_flow)},
+            {"line_item": "Free Cash Flow", "latest_value": latest.get("free_cash_flow")},
         ]
     )
 
@@ -3862,7 +4003,7 @@ def _build_financial_context_krx(
         raw_fs.to_csv(out_dir / "krx_fs_rows_raw.csv", index=False, encoding="utf-8-sig")
         income_table.to_csv(out_dir / "financial_income_statement.csv", index=False, encoding="utf-8-sig")
         balance_table.to_csv(out_dir / "financial_balance_sheet.csv", index=False, encoding="utf-8-sig")
-        cashflow_table.to_csv(out_dir / "financial_cashflow_statement.csv", index=False, encoding="utf-8-sig")
+        health_table.to_csv(out_dir / "financial_health_indicators.csv", index=False, encoding="utf-8-sig")
         (out_dir / "financial_source.txt").write_text(
             "source=krx_shared_sqlite\n"
             f"requested_ticker={requested_ticker}\n"
@@ -3882,7 +4023,7 @@ def _build_financial_context_krx(
         summary_table=summary_table,
         income_table=income_table,
         balance_table=balance_table,
-        cashflow_table=cashflow_table,
+        health_table=health_table,
         raw_fs_table=raw_fs_table,
         saved_dir=saved_dir,
         source_table=_build_financial_source_table(
@@ -4443,11 +4584,11 @@ def _html_financial_page(
         <div class="tables">
           <div class="card"><h3>제공자 상태</h3>{_safe_table(ctx.provider_status_table)}</div>
           <div class="card"><h3>재무 지표</h3>{_safe_table(_metrics_table(ctx.metrics))}</div>
-          <div class="card"><h3>최신 재무 요약</h3>{_safe_table(ctx.summary_table)}</div>
-          <div class="card"><h3>손익계산서(최근 기간)</h3>{_safe_table(ctx.income_table)}</div>
-          <div class="card"><h3>재무상태표(최근 기간)</h3>{_safe_table(ctx.balance_table)}</div>
-          <div class="card"><h3>현금흐름표(최근 기간)</h3>{_safe_table(ctx.cashflow_table)}</div>
-          <div class="card"><h3>KRX 원문 재무제표 행</h3>{_safe_table(ctx.raw_fs_table, max_rows=800)}</div>
+          <div class="card"><h3>최신 재무 요약 (단위: 십억원)</h3>{_safe_table(_summary_display_table(ctx.summary_table))}</div>
+          <div class="card"><h3>손익계산서(최근 기간, 단위: 십억원)</h3>{_safe_table(_financial_statement_display_table(ctx.income_table))}</div>
+          <div class="card"><h3>재무상태표(최근 기간, 단위: 십억원)</h3>{_safe_table(_financial_statement_display_table(ctx.balance_table))}</div>
+          <div class="card"><h3>재무 건전성 지표(최근 기간)</h3>{_safe_table(_financial_context_health_table(ctx))}</div>
+          <div class="card"><h3>KRX 원문 재무제표 행 (금액 단위: 십억원)</h3>{_safe_table(_financial_statement_display_table(ctx.raw_fs_table), max_rows=800)}</div>
         </div>
         """
 
@@ -6069,27 +6210,21 @@ def launch_stock_forecast_web_gui(
                 )
                 return
 
-            cache_key = self._financial_cache_key(self.state_fin_form)
-            cached = self.state_fin_cache.get(cache_key)
-            if cached is not None:
-                self.__class__.state_fin_ctx = cached
+            try:
+                fin_ctx = _run_financial_once(self.state_fin_form)
+                self.__class__.state_fin_ctx = fin_ctx
+                self.__class__.state_fin_cache[self._financial_cache_key(self.state_fin_form)] = fin_ctx
                 self.__class__.state_fin_error = None
-            else:
-                try:
-                    fin_ctx = _run_financial_once(self.state_fin_form)
-                    self.__class__.state_fin_ctx = fin_ctx
-                    self.__class__.state_fin_cache[cache_key] = fin_ctx
-                    self.__class__.state_fin_error = None
-                except Exception as exc:
-                    self.__class__.state_fin_ctx = None
-                    out_dir = Path(self.state_fin_form.get("output_dir", "outputs/stock_forecast_finance"))
-                    hint = security_hint(exc, output_dir=out_dir)
-                    if isinstance(exc, ValueError):
-                        self.__class__.state_fin_error = str(exc)
-                    else:
-                        self.__class__.state_fin_error = (
-                            f"{hint}\n\nRaw error: {exc}" if hint else traceback.format_exc()
-                        )
+            except Exception as exc:
+                self.__class__.state_fin_ctx = None
+                out_dir = Path(self.state_fin_form.get("output_dir", "outputs/stock_forecast_finance"))
+                hint = security_hint(exc, output_dir=out_dir)
+                if isinstance(exc, ValueError):
+                    self.__class__.state_fin_error = str(exc)
+                else:
+                    self.__class__.state_fin_error = (
+                        f"{hint}\n\nRaw error: {exc}" if hint else traceback.format_exc()
+                    )
 
             self._send_html(
                 _html_financial_page(

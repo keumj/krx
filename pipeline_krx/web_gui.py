@@ -41,15 +41,15 @@ _REFRESH_STAGE_DEFS: tuple[dict[str, object], ...] = (
     {
         "step_id": "prices",
         "label": "KRX prices",
-        "title": "가격/시총",
-        "description": "종가, 시가총액, 상장주식수 CSV와 SQLite prices 테이블을 갱신합니다.",
+        "title": "가격/시총/주식수",
+        "description": "종가, 시가총액, 상장주식수 CSV와 SQLite prices 테이블을 갱신하고 EPS를 보정합니다.",
         "item_datasets": ("krx_close_prices", "krx_market_caps", "krx_shares", "krx_prices_sqlite"),
     },
     {
         "step_id": "fundamentals",
         "label": "KRX DART fundamentals",
         "title": "DART 재무",
-        "description": "DART 기준 분기 재무를 SQLite fundamentals_quarterly에 적재합니다.",
+        "description": "DART 기준 분기 재무를 SQLite fundamentals_quarterly에 적재하고 주식수 기반 EPS를 갱신합니다.",
         "item_datasets": ("krx_fundamentals_quarterly",),
     },
     {

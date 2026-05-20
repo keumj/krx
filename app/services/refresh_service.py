@@ -40,14 +40,14 @@ class JobState:
 
 JOB_TEXTS = {
     "stock": {
-        "label": "KRX 가격/시총",
-        "button_label": "가격/시총 갱신",
-        "description": "KRX 가격 갱신 모듈을 실행해 가격 CSV, 시가총액 CSV, shared SQLite 가격 테이블을 갱신합니다.",
+        "label": "KRX 가격/시총/주식수",
+        "button_label": "가격/시총/주식수 갱신",
+        "description": "KRX 가격 갱신 모듈을 실행해 가격 CSV, 시가총액 CSV, 주식수 CSV, shared SQLite 가격 테이블과 EPS 보정을 갱신합니다.",
     },
     "quarterly": {
         "label": "KRX DART 분기재무",
         "button_label": "분기재무 갱신",
-        "description": "KRX DART 분기재무 갱신 모듈을 실행해 shared SQLite의 fundamentals_quarterly 테이블을 갱신합니다.",
+        "description": "KRX DART 분기재무 갱신 모듈을 실행해 shared SQLite의 fundamentals_quarterly 테이블과 주식수 기반 EPS를 갱신합니다.",
     },
     "news": {
         "label": "KRX 뉴스",

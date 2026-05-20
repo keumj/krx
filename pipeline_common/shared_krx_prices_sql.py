@@ -209,6 +209,24 @@ def load_shared_market_caps_for_symbols(
     return _metric_pivot(symbols, value_col="market_cap", start_date=start_date, end_date=end_date, shared_db_root=shared_db_root, db_path=db_path)
 
 
+def load_shared_shares_outstanding_for_symbols(
+    symbols: list[str],
+    *,
+    start_date: str | pd.Timestamp,
+    end_date: str | pd.Timestamp | None = None,
+    shared_db_root: Path | str | None = None,
+    db_path: Path | str | None = None,
+) -> tuple[pd.DataFrame | None, str | None]:
+    return _metric_pivot(
+        symbols,
+        value_col="shares_outstanding",
+        start_date=start_date,
+        end_date=end_date,
+        shared_db_root=shared_db_root,
+        db_path=db_path,
+    )
+
+
 def load_shared_adjusted_close_prices_for_symbols(
     symbols: list[str],
     *,
@@ -328,7 +346,7 @@ def load_shared_quarterly_fundamentals_for_symbols(
     query = (
         "SELECT symbol, fiscal_date, filing_date, period_type, revenue, operating_income, "
         "net_income, total_assets, total_liabilities, stockholders_equity, current_assets, "
-        "current_liabilities, total_debt, operating_cash_flow, free_cash_flow, capex, diluted_eps, source "
+        "current_liabilities, total_debt, operating_cash_flow, free_cash_flow, capex, shares_outstanding, diluted_eps, source "
         f"FROM fundamentals_quarterly WHERE symbol IN ({placeholders}) "
         "ORDER BY symbol, fiscal_date DESC"
     )
@@ -352,6 +370,7 @@ def load_shared_quarterly_fundamentals_for_symbols(
         "operating_cash_flow",
         "free_cash_flow",
         "capex",
+        "shares_outstanding",
         "diluted_eps",
     ]:
         frame[col] = pd.to_numeric(frame[col], errors="coerce")
