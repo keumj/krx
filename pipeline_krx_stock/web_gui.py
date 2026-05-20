@@ -29,11 +29,13 @@ from pipeline_common.notebook_data import fetch_krx_close_prices
 from pipeline_common.security import configure_ssl, ensure_writable_dir, security_hint
 from pipeline_common.shared_krx_prices_sql import (
     load_shared_close_prices_for_symbols,
+    load_shared_dividends_for_symbols,
     load_shared_dividend_yields_for_symbols,
     load_shared_fundamentals_snapshot_for_symbols,
     load_shared_krx_fs_rows_for_symbol,
     load_shared_market_caps_for_symbols,
     load_shared_quarterly_fundamentals_for_symbols,
+    load_shared_shares_outstanding_for_symbols,
     shared_prices_sqlite_path,
 )
 from . import technical_analysis as ta_web_gui
@@ -3183,6 +3185,51 @@ def _format_billion_krw_value(value: object) -> str:
     return f"{scaled:,.1f}"
 
 
+def _format_trillion_krw_value(value: object) -> str:
+    try:
+        numeric = float(value)
+    except Exception:
+        return "-" if value in (None, "") else str(value)
+    if not np.isfinite(numeric):
+        return "-"
+    scaled = numeric / 1_000_000_000_000.0
+    if abs(scaled) >= 100:
+        return f"{scaled:,.0f}조원"
+    return f"{scaled:,.2f}조원"
+
+
+def _format_krw_per_share_value(value: object) -> str:
+    try:
+        numeric = float(value)
+    except Exception:
+        return "-" if value in (None, "") else str(value)
+    if not np.isfinite(numeric):
+        return "-"
+    return f"{numeric:,.0f}원"
+
+
+def _format_percent_value(value: object) -> str:
+    try:
+        numeric = float(value)
+    except Exception:
+        return "-" if value in (None, "") else str(value)
+    if not np.isfinite(numeric):
+        return "-"
+    return f"{numeric:,.2f}%"
+
+
+def _format_ratio_percent_value(value: object) -> str:
+    try:
+        numeric = float(value)
+    except Exception:
+        return "-" if value in (None, "") else str(value)
+    if not np.isfinite(numeric):
+        return "-"
+    if abs(numeric) <= 1.0:
+        numeric *= 100.0
+    return f"{numeric:,.2f}%"
+
+
 def _is_per_share_line_item(value: object) -> bool:
     text = str(value or "").upper()
     return "EPS" in text or "주당" in text
@@ -3248,8 +3295,23 @@ def _short_error_message(exc: Exception) -> str:
 
 def _metrics_table(metrics: dict[str, object]) -> pd.DataFrame:
     return pd.DataFrame(
-        [{"metric": name, "value": _format_fin_value(value)} for name, value in metrics.items()]
+        [{"metric": name, "value": _format_metric_value(name, value)} for name, value in metrics.items()]
     )
+
+
+def _format_metric_value(name: object, value: object) -> str:
+    label = str(name or "").lower()
+    if "market cap" in label or "시가총액" in label:
+        return _format_trillion_krw_value(value)
+    if "eps" in label:
+        return _format_krw_per_share_value(value)
+    if "roe" in label:
+        return _format_ratio_percent_value(value)
+    if "yield" in label or "debt/equity" in label:
+        return _format_percent_value(value)
+    if "52w" in label:
+        return _format_krw_per_share_value(value)
+    return _format_fin_value(value)
 
 
 def _request_verify_value(ca_bundle_path: str | None, insecure_ssl: bool) -> bool | str:
@@ -3849,7 +3911,15 @@ def _build_financial_context_krx(
         [statement_ticker],
         start_date=(pd.Timestamp.today().normalize() - pd.Timedelta(days=370)).strftime("%Y-%m-%d"),
     )
+    shares_history, _shares_source = load_shared_shares_outstanding_for_symbols(
+        [statement_ticker],
+        start_date=(pd.Timestamp.today().normalize() - pd.Timedelta(days=370)).strftime("%Y-%m-%d"),
+    )
     dividend_yields, _dividend_yield_source = load_shared_dividend_yields_for_symbols(
+        [statement_ticker],
+        start_date=(pd.Timestamp.today().normalize() - pd.Timedelta(days=370)).strftime("%Y-%m-%d"),
+    )
+    dividends, _dividend_source = load_shared_dividends_for_symbols(
         [statement_ticker],
         start_date=(pd.Timestamp.today().normalize() - pd.Timedelta(days=370)).strftime("%Y-%m-%d"),
     )
@@ -3867,9 +3937,15 @@ def _build_financial_context_krx(
     caps = pd.Series(dtype=float)
     if market_caps is not None and statement_ticker in market_caps.columns:
         caps = pd.to_numeric(market_caps[statement_ticker], errors="coerce").dropna().sort_index()
+    share_series = pd.Series(dtype=float)
+    if shares_history is not None and statement_ticker in shares_history.columns:
+        share_series = pd.to_numeric(shares_history[statement_ticker], errors="coerce").dropna().sort_index()
     dividend_yield_series = pd.Series(dtype=float)
     if dividend_yields is not None and statement_ticker in dividend_yields.columns:
         dividend_yield_series = pd.to_numeric(dividend_yields[statement_ticker], errors="coerce").dropna().sort_index()
+    dividend_series = pd.Series(dtype=float)
+    if dividends is not None and statement_ticker in dividends.columns:
+        dividend_series = pd.to_numeric(dividends[statement_ticker], errors="coerce").dropna().sort_index()
     snapshot = pd.Series(dtype=object)
     if snapshots is not None and not snapshots.empty:
         snapshot_rows = snapshots[snapshots["symbol"] == statement_ticker].copy()
@@ -3879,7 +3955,11 @@ def _build_financial_context_krx(
 
     latest_price = float(close.iloc[-1]) if not close.empty else None
     market_cap = float(caps.iloc[-1]) if not caps.empty else None
+    price_date = pd.Timestamp(close.index[-1]).normalize() if not close.empty else None
+    market_cap_date = pd.Timestamp(caps.index[-1]).normalize() if not caps.empty else None
+    latest_price_shares = float(share_series.iloc[-1]) if not share_series.empty else None
     dividend_yield = float(dividend_yield_series.iloc[-1]) if not dividend_yield_series.empty else None
+    dividend_per_share = float(dividend_series.iloc[-1]) if not dividend_series.empty else None
     snapshot_per = _safe_float(snapshot.get("per")) if not snapshot.empty else None
     snapshot_pbr = _safe_float(snapshot.get("pbr")) if not snapshot.empty else None
     snapshot_eps = _safe_float(snapshot.get("eps")) if not snapshot.empty else None
@@ -3894,7 +3974,9 @@ def _build_financial_context_krx(
     ttm_net_income = pd.to_numeric(ttm_rows.get("net_income"), errors="coerce").dropna().sum(min_count=1) if not ttm_rows.empty else np.nan
     ttm_eps = pd.to_numeric(ttm_rows.get("diluted_eps"), errors="coerce").dropna().sum(min_count=1) if not ttm_rows.empty else np.nan
     average_equity = pd.to_numeric(ttm_rows.get("stockholders_equity"), errors="coerce").dropna().mean() if not ttm_rows.empty else np.nan
+    latest_total_assets = _latest_number(quarterly, "total_assets")
     latest_equity = _latest_number(quarterly, "stockholders_equity")
+    latest_shares = latest_price_shares if latest_price_shares is not None else _latest_number(quarterly, "shares_outstanding")
     latest_debt = _latest_number(quarterly, "total_debt")
     total_liabilities = _latest_number(quarterly, "total_liabilities")
     current_assets = _latest_number(quarterly, "current_assets")
@@ -3934,9 +4016,18 @@ def _build_financial_context_krx(
         statement_keywords=("현금흐름",),
         account_candidates=("영업활동현금흐름", "영업활동으로 인한 현금흐름", "영업활동 순현금흐름"),
     )
+    latest_total_assets = latest_total_assets if latest_total_assets is not None else raw_total_assets
     latest_equity = latest_equity if latest_equity is not None else raw_equity
     total_liabilities = total_liabilities if total_liabilities is not None else raw_total_liabilities
+    if latest_equity is None and latest_total_assets is not None and total_liabilities is not None:
+        latest_equity = float(latest_total_assets) - float(total_liabilities)
     debt_to_equity_base = total_liabilities if total_liabilities is not None else latest_debt
+    if (
+        latest_price is not None
+        and latest_shares is not None
+        and (market_cap is None or (price_date is not None and market_cap_date is not None and market_cap_date < price_date))
+    ):
+        market_cap = float(latest_price) * float(latest_shares)
 
     trailing_per = (
         latest_price / float(ttm_eps)
@@ -3947,13 +4038,16 @@ def _build_financial_context_krx(
         trailing_per = float(market_cap) / float(ttm_net_income)
 
     trailing_eps = float(ttm_eps) if np.isfinite(ttm_eps) else None
+    if trailing_eps is None and np.isfinite(ttm_net_income) and latest_shares not in (None, 0):
+        trailing_eps = float(ttm_net_income) / float(latest_shares)
     if trailing_eps is None and latest_price is not None and trailing_per not in (None, 0):
         trailing_eps = float(latest_price) / float(trailing_per)
+    if dividend_yield is None and dividend_per_share is not None and dividend_per_share > 0 and latest_price not in (None, 0):
+        dividend_yield = (float(dividend_per_share) / float(latest_price)) * 100.0
 
     metrics = {
         "Market Cap": market_cap,
         "PER (Trailing)": snapshot_per if snapshot_per is not None else trailing_per,
-        "PER (Forward)": None,
         "PBR": snapshot_pbr if snapshot_pbr is not None else ((market_cap / latest_equity) if market_cap is not None and latest_equity not in (None, 0) else None),
         "EPS (Trailing)": snapshot_eps if snapshot_eps is not None else trailing_eps,
         "ROE": (float(ttm_net_income) / float(average_equity)) if np.isfinite(ttm_net_income) and np.isfinite(average_equity) and float(average_equity) != 0 else None,
@@ -4598,10 +4692,13 @@ def _html_financial_page(
           <div class="metric"><span>회사명</span><strong>{html.escape(str(ctx.company_name or '-'))}</strong></div>
           <div class="metric"><span>통화</span><strong>{html.escape(str(ctx.currency or '-'))}</strong></div>
           <div class="metric"><span>PER (Trailing)</span><strong>{_format_fin_value(ctx.metrics.get("PER (Trailing)"))}</strong></div>
-          <div class="metric"><span>PER (Forward)</span><strong>{_format_fin_value(ctx.metrics.get("PER (Forward)"))}</strong></div>
           <div class="metric"><span>PBR</span><strong>{_format_fin_value(ctx.metrics.get("PBR"))}</strong></div>
-          <div class="metric"><span>시가총액</span><strong>{_format_fin_value(ctx.metrics.get("Market Cap"))}</strong></div>
-          <div class="metric"><span>ROE</span><strong>{_format_fin_value(ctx.metrics.get("ROE"))}</strong></div>
+          <div class="metric"><span>시가총액</span><strong>{_format_trillion_krw_value(ctx.metrics.get("Market Cap"))}</strong></div>
+          <div class="metric"><span>EPS (Trailing)</span><strong>{_format_krw_per_share_value(ctx.metrics.get("EPS (Trailing)"))}</strong></div>
+          <div class="metric"><span>ROE</span><strong>{_format_ratio_percent_value(ctx.metrics.get("ROE"))}</strong></div>
+          <div class="metric"><span>Debt/Equity</span><strong>{_format_percent_value(ctx.metrics.get("Debt/Equity"))}</strong></div>
+          <div class="metric"><span>Current Ratio</span><strong>{_format_fin_value(ctx.metrics.get("Current Ratio"))}</strong></div>
+          <div class="metric"><span>Dividend Yield</span><strong>{_format_percent_value(ctx.metrics.get("Dividend Yield"))}</strong></div>
         </div>
         """
 

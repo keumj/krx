@@ -245,6 +245,24 @@ def load_shared_dividend_yields_for_symbols(
     )
 
 
+def load_shared_dividends_for_symbols(
+    symbols: list[str],
+    *,
+    start_date: str | pd.Timestamp,
+    end_date: str | pd.Timestamp | None = None,
+    shared_db_root: Path | str | None = None,
+    db_path: Path | str | None = None,
+) -> tuple[pd.DataFrame | None, str | None]:
+    return _metric_pivot(
+        symbols,
+        value_col="dividends",
+        start_date=start_date,
+        end_date=end_date,
+        shared_db_root=shared_db_root,
+        db_path=db_path,
+    )
+
+
 def load_shared_adjusted_close_prices_for_symbols(
     symbols: list[str],
     *,

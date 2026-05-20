@@ -7,6 +7,7 @@ import pandas as pd
 
 from .shared_krx_prices_sql import (
     load_shared_close_prices_for_symbols,
+    load_shared_dividends_for_symbols,
     load_shared_dividend_yields_for_symbols,
     load_shared_fundamentals_snapshot_for_symbols,
     load_shared_market_caps_for_symbols,
@@ -108,11 +109,19 @@ def derive_shared_fundamental_metrics(
         shared_db_root=shared_db_root,
         db_path=target,
     )
+    dividends, dividend_source = load_shared_dividends_for_symbols(
+        normalized,
+        start_date=price_start,
+        end_date=price_end,
+        shared_db_root=shared_db_root,
+        db_path=target,
+    )
 
     close_history = close_history if close_history is not None else pd.DataFrame()
     market_caps = market_caps if market_caps is not None else pd.DataFrame()
     shares_history = shares_history if shares_history is not None else pd.DataFrame()
     dividend_yields = dividend_yields if dividend_yields is not None else pd.DataFrame()
+    dividends = dividends if dividends is not None else pd.DataFrame()
 
     rows: list[dict[str, object]] = []
     for symbol, sub in quarterly.groupby("symbol", sort=True):
@@ -136,7 +145,15 @@ def derive_shared_fundamental_metrics(
         ttm_eps = pd.to_numeric(ttm_rows["diluted_eps"], errors="coerce").dropna().sum(min_count=1)
         equity_values = pd.to_numeric(ttm_rows["stockholders_equity"], errors="coerce").dropna()
         latest_equity = pd.to_numeric(pd.Series([latest.get("stockholders_equity")]), errors="coerce").dropna()
+        latest_total_assets = pd.to_numeric(pd.Series([latest.get("total_assets")]), errors="coerce").dropna()
+        latest_total_liabilities_for_equity = pd.to_numeric(pd.Series([latest.get("total_liabilities")]), errors="coerce").dropna()
         latest_equity_value = float(latest_equity.iloc[0]) if not latest_equity.empty else np.nan
+        if (
+            not np.isfinite(latest_equity_value)
+            and not latest_total_assets.empty
+            and not latest_total_liabilities_for_equity.empty
+        ):
+            latest_equity_value = float(latest_total_assets.iloc[0]) - float(latest_total_liabilities_for_equity.iloc[0])
         average_equity = float(equity_values.mean()) if not equity_values.empty else np.nan
 
         latest_net_income = pd.to_numeric(pd.Series([latest.get("net_income")]), errors="coerce").dropna()
@@ -165,11 +182,25 @@ def derive_shared_fundamental_metrics(
             if latest_shares_value is not None:
                 latest_shares = latest_shares_value
 
+        if (
+            np.isfinite(latest_price)
+            and np.isfinite(latest_shares)
+            and (
+                not np.isfinite(latest_market_cap)
+                or (price_date is not None and market_cap_date is not None and market_cap_date < price_date)
+            )
+        ):
+            latest_market_cap = float(latest_price) * float(latest_shares)
+
         dividend_yield_date = None
         latest_dividend_yield = np.nan
         if symbol in dividend_yields.columns:
             dividend_yield_date, latest_dividend_yield_value = _last_value_on_or_before(dividend_yields[symbol], as_of_ts)
             latest_dividend_yield = latest_dividend_yield_value if latest_dividend_yield_value is not None else np.nan
+        if (not np.isfinite(latest_dividend_yield)) and symbol in dividends.columns and np.isfinite(latest_price) and latest_price != 0:
+            _dividend_date, latest_dividend_value = _last_value_on_or_before(dividends[symbol], as_of_ts)
+            if latest_dividend_value is not None and latest_dividend_value > 0:
+                latest_dividend_yield = (float(latest_dividend_value) / float(latest_price)) * 100.0
 
         positive_latest_shares = _safe_positive(latest_shares)
         if not np.isfinite(ttm_eps) and np.isfinite(ttm_net_income) and positive_latest_shares is not None:
@@ -296,6 +327,6 @@ def derive_shared_fundamental_metrics(
         return pd.DataFrame(), "not_available"
 
     frame = pd.DataFrame(rows).sort_values("symbol").reset_index(drop=True)
-    source_parts = [part for part in [snapshot_source, quarterly_source, price_source, market_cap_source, shares_source, dividend_yield_source] if part]
+    source_parts = [part for part in [snapshot_source, quarterly_source, price_source, market_cap_source, shares_source, dividend_yield_source, dividend_source] if part]
     source = " | ".join(dict.fromkeys(source_parts)) if source_parts else f"sqlite:{target.as_posix()}"
     return frame, source

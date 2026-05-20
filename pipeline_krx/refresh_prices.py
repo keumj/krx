@@ -145,20 +145,28 @@ def _load_components_from_sqlite(db_path: Path) -> pd.DataFrame:
         frame = pd.read_sql_query(
             """
             SELECT
-                symbol AS Symbol,
-                market AS Market,
-                name_kr AS NameKR,
-                name_en AS NameEN,
-                sector AS Sector,
-                industry AS Industry,
-                listing_date AS ListingDate,
-                reference_source AS ReferenceSource
-            FROM securities
-            WHERE COALESCE(is_active, 1) = 1
-              AND symbol IS NOT NULL
+                s.symbol AS Symbol,
+                s.market AS Market,
+                s.name_kr AS NameKR,
+                s.name_en AS NameEN,
+                s.sector AS Sector,
+                s.industry AS Industry,
+                s.listing_date AS ListingDate,
+                s.reference_source AS ReferenceSource,
+                (
+                    SELECT p.shares_outstanding
+                    FROM prices AS p
+                    WHERE p.symbol = s.symbol
+                      AND p.shares_outstanding IS NOT NULL
+                    ORDER BY p.date DESC
+                    LIMIT 1
+                ) AS SharesOutstanding
+            FROM securities AS s
+            WHERE COALESCE(s.is_active, 1) = 1
+              AND s.symbol IS NOT NULL
             ORDER BY
-                CASE market WHEN 'KOSPI' THEN 0 WHEN 'KOSDAQ' THEN 1 WHEN 'KONEX' THEN 2 ELSE 3 END,
-                symbol
+                CASE s.market WHEN 'KOSPI' THEN 0 WHEN 'KOSDAQ' THEN 1 WHEN 'KONEX' THEN 2 ELSE 3 END,
+                s.symbol
             """,
             conn,
         )
@@ -166,7 +174,7 @@ def _load_components_from_sqlite(db_path: Path) -> pd.DataFrame:
         return frame
     frame["Symbol"] = frame["Symbol"].map(_normalize_symbol)
     frame["Market"] = frame["Market"].astype(str).str.strip().str.upper().replace({"": "UNKNOWN", "NONE": "UNKNOWN", "NAN": "UNKNOWN"})
-    frame["SharesOutstanding"] = None
+    frame["SharesOutstanding"] = frame["SharesOutstanding"].map(_normalize_number)
     return frame
 
 
