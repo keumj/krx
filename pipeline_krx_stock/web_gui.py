@@ -29,6 +29,8 @@ from pipeline_common.notebook_data import fetch_krx_close_prices
 from pipeline_common.security import configure_ssl, ensure_writable_dir, security_hint
 from pipeline_common.shared_krx_prices_sql import (
     load_shared_close_prices_for_symbols,
+    load_shared_dividend_yields_for_symbols,
+    load_shared_fundamentals_snapshot_for_symbols,
     load_shared_krx_fs_rows_for_symbol,
     load_shared_market_caps_for_symbols,
     load_shared_quarterly_fundamentals_for_symbols,
@@ -3847,6 +3849,11 @@ def _build_financial_context_krx(
         [statement_ticker],
         start_date=(pd.Timestamp.today().normalize() - pd.Timedelta(days=370)).strftime("%Y-%m-%d"),
     )
+    dividend_yields, _dividend_yield_source = load_shared_dividend_yields_for_symbols(
+        [statement_ticker],
+        start_date=(pd.Timestamp.today().normalize() - pd.Timedelta(days=370)).strftime("%Y-%m-%d"),
+    )
+    snapshots, _snapshot_source = load_shared_fundamentals_snapshot_for_symbols([statement_ticker])
 
     quarterly = quarterly if quarterly is not None else pd.DataFrame()
     raw_fs = raw_fs if raw_fs is not None else pd.DataFrame()
@@ -3860,9 +3867,25 @@ def _build_financial_context_krx(
     caps = pd.Series(dtype=float)
     if market_caps is not None and statement_ticker in market_caps.columns:
         caps = pd.to_numeric(market_caps[statement_ticker], errors="coerce").dropna().sort_index()
+    dividend_yield_series = pd.Series(dtype=float)
+    if dividend_yields is not None and statement_ticker in dividend_yields.columns:
+        dividend_yield_series = pd.to_numeric(dividend_yields[statement_ticker], errors="coerce").dropna().sort_index()
+    snapshot = pd.Series(dtype=object)
+    if snapshots is not None and not snapshots.empty:
+        snapshot_rows = snapshots[snapshots["symbol"] == statement_ticker].copy()
+        if not snapshot_rows.empty:
+            snapshot_rows["as_of_date"] = pd.to_datetime(snapshot_rows["as_of_date"], errors="coerce")
+            snapshot = snapshot_rows.sort_values("as_of_date", ascending=False).iloc[0]
 
     latest_price = float(close.iloc[-1]) if not close.empty else None
     market_cap = float(caps.iloc[-1]) if not caps.empty else None
+    dividend_yield = float(dividend_yield_series.iloc[-1]) if not dividend_yield_series.empty else None
+    snapshot_per = _safe_float(snapshot.get("per")) if not snapshot.empty else None
+    snapshot_pbr = _safe_float(snapshot.get("pbr")) if not snapshot.empty else None
+    snapshot_eps = _safe_float(snapshot.get("eps")) if not snapshot.empty else None
+    snapshot_dividend_yield = _safe_float(snapshot.get("dividend_yield")) if not snapshot.empty else None
+    if snapshot_dividend_yield is not None:
+        dividend_yield = snapshot_dividend_yield
     year_high = float(close.max()) if not close.empty else None
     year_low = float(close.min()) if not close.empty else None
 
@@ -3873,6 +3896,7 @@ def _build_financial_context_krx(
     average_equity = pd.to_numeric(ttm_rows.get("stockholders_equity"), errors="coerce").dropna().mean() if not ttm_rows.empty else np.nan
     latest_equity = _latest_number(quarterly, "stockholders_equity")
     latest_debt = _latest_number(quarterly, "total_debt")
+    total_liabilities = _latest_number(quarterly, "total_liabilities")
     current_assets = _latest_number(quarterly, "current_assets")
     current_liabilities = _latest_number(quarterly, "current_liabilities")
     raw_revenue = _raw_fs_latest_amount(
@@ -3911,6 +3935,8 @@ def _build_financial_context_krx(
         account_candidates=("영업활동현금흐름", "영업활동으로 인한 현금흐름", "영업활동 순현금흐름"),
     )
     latest_equity = latest_equity if latest_equity is not None else raw_equity
+    total_liabilities = total_liabilities if total_liabilities is not None else raw_total_liabilities
+    debt_to_equity_base = total_liabilities if total_liabilities is not None else latest_debt
 
     trailing_per = (
         latest_price / float(ttm_eps)
@@ -3926,14 +3952,14 @@ def _build_financial_context_krx(
 
     metrics = {
         "Market Cap": market_cap,
-        "PER (Trailing)": trailing_per,
+        "PER (Trailing)": snapshot_per if snapshot_per is not None else trailing_per,
         "PER (Forward)": None,
-        "PBR": (market_cap / latest_equity) if market_cap is not None and latest_equity not in (None, 0) else None,
-        "EPS (Trailing)": trailing_eps,
+        "PBR": snapshot_pbr if snapshot_pbr is not None else ((market_cap / latest_equity) if market_cap is not None and latest_equity not in (None, 0) else None),
+        "EPS (Trailing)": snapshot_eps if snapshot_eps is not None else trailing_eps,
         "ROE": (float(ttm_net_income) / float(average_equity)) if np.isfinite(ttm_net_income) and np.isfinite(average_equity) and float(average_equity) != 0 else None,
-        "Debt/Equity": ((latest_debt / latest_equity) * 100.0) if latest_debt is not None and latest_equity not in (None, 0) else None,
+        "Debt/Equity": ((debt_to_equity_base / latest_equity) * 100.0) if debt_to_equity_base is not None and latest_equity not in (None, 0) else None,
         "Current Ratio": (current_assets / current_liabilities) if current_assets is not None and current_liabilities not in (None, 0) else None,
-        "Dividend Yield": None,
+        "Dividend Yield": dividend_yield,
         "52W High": year_high,
         "52W Low": year_low,
     }

@@ -12,12 +12,17 @@ import pandas as pd
 
 from pipeline_common.security import configure_ssl
 
-from .db import init_krx_project_db, upsert_krx_prices, upsert_krx_securities
+from .db import init_krx_project_db, upsert_krx_fundamentals_snapshot, upsert_krx_prices, upsert_krx_securities
 
 try:
     import FinanceDataReader as fdr
 except Exception:  # pragma: no cover - optional dependency
     fdr = None
+
+try:
+    from pykrx import stock as pykrx_stock
+except Exception:  # pragma: no cover - optional dependency
+    pykrx_stock = None
 
 
 DEFAULT_START_DATE = "2019-12-31"
@@ -187,7 +192,14 @@ def _load_components(path: Path, *, db_path: Path | None = None) -> pd.DataFrame
     )
 
 
-def _standardize_price_frame(raw: pd.DataFrame, *, symbol: str, shares_outstanding: float | None) -> pd.DataFrame:
+def _standardize_price_frame(
+    raw: pd.DataFrame,
+    *,
+    symbol: str,
+    shares_outstanding: float | None,
+    dividend_per_share: float | None = None,
+    dividend_yield: float | None = None,
+) -> pd.DataFrame:
     if raw is None or raw.empty:
         return pd.DataFrame()
 
@@ -220,13 +232,63 @@ def _standardize_price_frame(raw: pd.DataFrame, *, symbol: str, shares_outstandi
         out["shares_outstanding"] = None
     out["foreign_ownership_pct"] = None
     out["adj_close"] = out["close"]
-    out["dividends"] = 0.0
+    out["dividends"] = float(dividend_per_share) if dividend_per_share is not None else 0.0
+    out["dividend_yield"] = float(dividend_yield) if dividend_yield is not None else None
     out["stock_splits"] = 0.0
     out["currency"] = "KRW"
     out["source"] = "fdr"
     out = out.dropna(subset=["date", "open", "high", "low", "close"])
     out = out[~out.index.isna()].sort_index()
     return out.reset_index(drop=True)
+
+
+def _load_latest_krx_fundamental_metrics(symbols: list[str], *, end_date: str | None) -> tuple[dict[str, dict[str, float | None]], str | None]:
+    if pykrx_stock is None or not symbols:
+        return {}, None
+
+    query_end = pd.Timestamp(end_date).normalize() if end_date else pd.Timestamp.today().normalize()
+    wanted = {_normalize_symbol(symbol) for symbol in symbols if _normalize_symbol(symbol)}
+    if not wanted:
+        return {}, None
+
+    for query_date in pd.date_range(end=query_end, periods=10, freq="D")[::-1]:
+        date_text = query_date.strftime("%Y%m%d")
+        frames: list[pd.DataFrame] = []
+        for market in ("KOSPI", "KOSDAQ", "KONEX"):
+            try:
+                frame = pykrx_stock.get_market_fundamental(date_text, market=market)
+            except Exception:
+                continue
+            if frame is not None and not frame.empty:
+                frames.append(frame)
+        if not frames:
+            continue
+
+        combined = pd.concat(frames, axis=0)
+        combined.index = combined.index.map(_normalize_symbol)
+        out: dict[str, dict[str, float | None]] = {}
+        for symbol in wanted.intersection(set(combined.index)):
+            row = combined.loc[symbol]
+            if isinstance(row, pd.DataFrame):
+                row = row.iloc[0]
+            metrics = {
+                "per": _normalize_number(row.get("PER")),
+                "pbr": _normalize_number(row.get("PBR")),
+                "eps": _normalize_number(row.get("EPS")),
+                "bps": _normalize_number(row.get("BPS")),
+                "dividend_per_share": _normalize_number(row.get("DPS")),
+                "dividend_yield": _normalize_number(row.get("DIV")),
+            }
+            if any(value is not None for value in metrics.values()):
+                out[symbol] = {
+                    key: value
+                    for key, value in metrics.items()
+                }
+        if out:
+            source = f"pykrx:market_fundamental:{date_text}"
+            _log(f"fundamental metrics source: {source} symbols={len(out)}")
+            return out, date_text
+    return {}, None
 
 
 def _latest_price_dates(db_path: Path) -> dict[str, str]:
@@ -342,6 +404,24 @@ def refresh_krx_prices(
 
     price_frames: list[pd.DataFrame] = []
     latest_dates = _latest_price_dates(sqlite_result.db_path)
+    component_symbols = [_normalize_symbol(value) for value in components["Symbol"].tolist()]
+    fundamental_metrics, fundamental_date = _load_latest_krx_fundamental_metrics(component_symbols, end_date=end_date)
+    if fundamental_metrics:
+        snapshot_rows = [
+            {
+                "symbol": symbol,
+                "as_of_date": pd.Timestamp(fundamental_date).strftime("%Y-%m-%d") if fundamental_date else pd.Timestamp.today().normalize().strftime("%Y-%m-%d"),
+                "per": metrics.get("per"),
+                "pbr": metrics.get("pbr"),
+                "eps": metrics.get("eps"),
+                "bps": metrics.get("bps"),
+                "dividend_yield": metrics.get("dividend_yield"),
+                "source": f"pykrx:market_fundamental:{fundamental_date or 'latest'}",
+            }
+            for symbol, metrics in fundamental_metrics.items()
+        ]
+        changed_snapshot_rows = upsert_krx_fundamentals_snapshot(pd.DataFrame(snapshot_rows), db_path=sqlite_result.db_path)
+        _log(f"fundamentals_snapshot changed_rows={changed_snapshot_rows}")
     total = len(components.index)
     batch_size = DEFAULT_PROGRESS_BATCH_SIZE
     batch_start_index = 1
@@ -359,13 +439,20 @@ def refresh_krx_prices(
             )
         symbol = _normalize_symbol(getattr(row, "Symbol"))
         shares_outstanding = _normalize_number(getattr(row, "SharesOutstanding", None))
+        fundamental_metric = fundamental_metrics.get(symbol, {})
         symbol_start_date = _incremental_start_date(
             configured_start_date=start_date,
             latest_date=latest_dates.get(symbol),
             overlap_days=incremental_overlap_days,
         )
         raw = fdr.DataReader(symbol, symbol_start_date, end_date) if end_date else fdr.DataReader(symbol, symbol_start_date)
-        standardized = _standardize_price_frame(raw, symbol=symbol, shares_outstanding=shares_outstanding)
+        standardized = _standardize_price_frame(
+            raw,
+            symbol=symbol,
+            shares_outstanding=shares_outstanding,
+            dividend_per_share=_normalize_number(fundamental_metric.get("dividend_per_share")),
+            dividend_yield=_normalize_number(fundamental_metric.get("dividend_yield")),
+        )
         if not standardized.empty:
             price_frames.append(standardized)
             batch_stored_symbols += 1

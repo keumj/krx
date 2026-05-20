@@ -182,6 +182,7 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             foreign_ownership_pct REAL,
             adj_close REAL,
             dividends REAL NOT NULL DEFAULT 0,
+            dividend_yield REAL,
             stock_splits REAL NOT NULL DEFAULT 0,
             currency TEXT NOT NULL DEFAULT 'KRW',
             source TEXT NOT NULL DEFAULT 'unknown',
@@ -314,6 +315,9 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_securities_sector ON securities(sector)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_prices_date_symbol ON prices(date, symbol)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_prices_symbol_date_market_cap ON prices(symbol, date, market_cap)")
+    existing_price_cols = {row[1] for row in conn.execute("PRAGMA table_info(prices)")}
+    if "dividend_yield" not in existing_price_cols:
+        conn.execute("ALTER TABLE prices ADD COLUMN dividend_yield REAL")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_fund_snapshot_as_of_date ON fundamentals_snapshot(as_of_date)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_fund_quarterly_symbol_date ON fundamentals_quarterly(symbol, fiscal_date)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_fund_quarterly_fiscal_date ON fundamentals_quarterly(fiscal_date)")
@@ -360,6 +364,7 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             p.market_cap,
             p.shares_outstanding,
             p.foreign_ownership_pct,
+            p.dividend_yield,
             p.currency
         FROM news_articles AS n
         LEFT JOIN prices AS p
@@ -400,6 +405,7 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             p.market_cap,
             p.shares_outstanding,
             p.foreign_ownership_pct,
+            p.dividend_yield,
             p.currency
         FROM news_articles AS n
         LEFT JOIN prices AS p
@@ -624,6 +630,7 @@ def upsert_krx_prices(
                 _normalize_number(record.get(cols.get("foreign_ownership_pct"))),
                 _normalize_number(record.get(cols.get("adj_close"))),
                 _normalize_number(record.get(cols.get("dividends"))) or 0.0,
+                _normalize_number(record.get(cols.get("dividend_yield"))),
                 _normalize_number(record.get(cols.get("stock_splits"))) or 0.0,
                 _normalize_text(record.get(cols.get("currency"))) or "KRW",
                 _normalize_text(record.get(cols.get("source"))) or "unknown",
@@ -640,9 +647,9 @@ def upsert_krx_prices(
             """
             INSERT INTO prices(
                 symbol, date, open, high, low, close, volume, trading_value, market_cap,
-                shares_outstanding, foreign_ownership_pct, adj_close, dividends, stock_splits, currency, source
+                shares_outstanding, foreign_ownership_pct, adj_close, dividends, dividend_yield, stock_splits, currency, source
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(symbol, date) DO UPDATE SET
                 open=excluded.open,
                 high=excluded.high,
@@ -655,6 +662,7 @@ def upsert_krx_prices(
                 foreign_ownership_pct=excluded.foreign_ownership_pct,
                 adj_close=COALESCE(excluded.adj_close, prices.adj_close),
                 dividends=excluded.dividends,
+                dividend_yield=COALESCE(excluded.dividend_yield, prices.dividend_yield),
                 stock_splits=excluded.stock_splits,
                 currency=excluded.currency,
                 source=excluded.source
@@ -665,6 +673,78 @@ def upsert_krx_prices(
         _sync_quarterly_shares_and_eps_from_prices(conn, symbols=[str(row[0]) for row in rows])
         conn.commit()
         return stored
+
+
+def upsert_krx_fundamentals_snapshot(
+    frame: pd.DataFrame,
+    *,
+    db_path: Path | str | None = None,
+    shared_db_root: Path | str | None = None,
+) -> int:
+    if frame is None or frame.empty:
+        return 0
+
+    target = Path(db_path) if db_path is not None else krx_prices_sqlite_path(shared_db_root)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    normalized = frame.copy()
+    cols = {str(col).strip().lower(): col for col in normalized.columns}
+    symbol_col = cols.get("symbol")
+    if symbol_col is None:
+        raise ValueError("fundamentals snapshot frame must include symbol column")
+
+    rows: list[tuple[object, ...]] = []
+    for record in normalized.to_dict(orient="records"):
+        symbol = _normalize_symbol(record.get(symbol_col))
+        if not symbol:
+            continue
+        rows.append(
+            (
+                symbol,
+                _normalize_date_text(record.get(cols.get("as_of_date"))) or pd.Timestamp.today().normalize().strftime("%Y-%m-%d"),
+                _normalize_text(record.get(cols.get("market"))),
+                _normalize_number(record.get(cols.get("per"))),
+                _normalize_number(record.get(cols.get("pbr"))),
+                _normalize_number(record.get(cols.get("roe"))),
+                _normalize_number(record.get(cols.get("eps"))),
+                _normalize_number(record.get(cols.get("bps"))),
+                _normalize_number(record.get(cols.get("dividend_yield"))),
+                _normalize_number(record.get(cols.get("shares_outstanding"))),
+                _normalize_number(record.get(cols.get("market_cap"))),
+                _normalize_text(record.get(cols.get("source"))) or "unknown",
+            )
+        )
+
+    if not rows:
+        return 0
+
+    with _connect(target) as conn:
+        _ensure_schema(conn)
+        before = conn.total_changes
+        conn.executemany(
+            """
+            INSERT INTO fundamentals_snapshot(
+                symbol, as_of_date, market, per, pbr, roe, eps, bps, dividend_yield,
+                shares_outstanding, market_cap, source
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(symbol) DO UPDATE SET
+                as_of_date=excluded.as_of_date,
+                market=COALESCE(excluded.market, fundamentals_snapshot.market),
+                per=COALESCE(excluded.per, fundamentals_snapshot.per),
+                pbr=COALESCE(excluded.pbr, fundamentals_snapshot.pbr),
+                roe=COALESCE(excluded.roe, fundamentals_snapshot.roe),
+                eps=COALESCE(excluded.eps, fundamentals_snapshot.eps),
+                bps=COALESCE(excluded.bps, fundamentals_snapshot.bps),
+                dividend_yield=COALESCE(excluded.dividend_yield, fundamentals_snapshot.dividend_yield),
+                shares_outstanding=COALESCE(excluded.shares_outstanding, fundamentals_snapshot.shares_outstanding),
+                market_cap=COALESCE(excluded.market_cap, fundamentals_snapshot.market_cap),
+                source=excluded.source,
+                updated_at=CURRENT_TIMESTAMP
+            """,
+            rows,
+        )
+        conn.commit()
+        return int(conn.total_changes - before)
 
 
 def upsert_krx_quarterly_fundamentals(

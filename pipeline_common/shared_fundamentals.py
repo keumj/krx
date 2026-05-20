@@ -7,6 +7,8 @@ import pandas as pd
 
 from .shared_krx_prices_sql import (
     load_shared_close_prices_for_symbols,
+    load_shared_dividend_yields_for_symbols,
+    load_shared_fundamentals_snapshot_for_symbols,
     load_shared_market_caps_for_symbols,
     load_shared_quarterly_fundamentals_for_symbols,
     load_shared_shares_outstanding_for_symbols,
@@ -68,6 +70,12 @@ def derive_shared_fundamental_metrics(
     )
     if quarterly is None or quarterly.empty:
         return pd.DataFrame(), "not_available"
+    snapshots, snapshot_source = load_shared_fundamentals_snapshot_for_symbols(
+        normalized,
+        shared_db_root=shared_db_root,
+        db_path=target,
+    )
+    snapshots = snapshots if snapshots is not None else pd.DataFrame()
 
     as_of_ts = pd.Timestamp(as_of_date).normalize() if as_of_date is not None else pd.Timestamp.today().normalize()
     price_start = (as_of_ts - pd.Timedelta(days=420)).strftime("%Y-%m-%d")
@@ -93,13 +101,28 @@ def derive_shared_fundamental_metrics(
         shared_db_root=shared_db_root,
         db_path=target,
     )
+    dividend_yields, dividend_yield_source = load_shared_dividend_yields_for_symbols(
+        normalized,
+        start_date=price_start,
+        end_date=price_end,
+        shared_db_root=shared_db_root,
+        db_path=target,
+    )
 
     close_history = close_history if close_history is not None else pd.DataFrame()
     market_caps = market_caps if market_caps is not None else pd.DataFrame()
     shares_history = shares_history if shares_history is not None else pd.DataFrame()
+    dividend_yields = dividend_yields if dividend_yields is not None else pd.DataFrame()
 
     rows: list[dict[str, object]] = []
     for symbol, sub in quarterly.groupby("symbol", sort=True):
+        snapshot = pd.Series(dtype=object)
+        if not snapshots.empty:
+            snapshot_rows = snapshots[snapshots["symbol"] == symbol].copy()
+            if not snapshot_rows.empty:
+                snapshot_rows["as_of_date"] = pd.to_datetime(snapshot_rows["as_of_date"], errors="coerce")
+                snapshot = snapshot_rows.sort_values("as_of_date", ascending=False).iloc[0]
+
         ordered = sub.copy()
         ordered["fiscal_date"] = pd.to_datetime(ordered["fiscal_date"], errors="coerce")
         ordered = ordered.dropna(subset=["fiscal_date"]).sort_values("fiscal_date", ascending=False).reset_index(drop=True)
@@ -142,6 +165,12 @@ def derive_shared_fundamental_metrics(
             if latest_shares_value is not None:
                 latest_shares = latest_shares_value
 
+        dividend_yield_date = None
+        latest_dividend_yield = np.nan
+        if symbol in dividend_yields.columns:
+            dividend_yield_date, latest_dividend_yield_value = _last_value_on_or_before(dividend_yields[symbol], as_of_ts)
+            latest_dividend_yield = latest_dividend_yield_value if latest_dividend_yield_value is not None else np.nan
+
         positive_latest_shares = _safe_positive(latest_shares)
         if not np.isfinite(ttm_eps) and np.isfinite(ttm_net_income) and positive_latest_shares is not None:
             ttm_eps = float(ttm_net_income) / float(positive_latest_shares)
@@ -163,32 +192,48 @@ def derive_shared_fundamental_metrics(
         positive_market_cap = _safe_positive(latest_market_cap)
         positive_latest_price = _safe_positive(latest_price)
 
-        roe = (
+        calculated_roe = (
             float(ttm_net_income) / float(positive_average_equity)
             if np.isfinite(ttm_net_income) and positive_average_equity is not None
             else np.nan
         )
-        per = (
+        calculated_per = (
             float(positive_latest_price) / float(positive_ttm_eps)
             if positive_latest_price is not None and positive_ttm_eps is not None
             else np.nan
         )
-        pbr = (
+        calculated_pbr = (
             float(positive_market_cap) / float(positive_latest_equity)
             if positive_market_cap is not None and positive_latest_equity is not None
             else np.nan
         )
+        snapshot_per = pd.to_numeric(pd.Series([snapshot.get("per")]), errors="coerce").dropna()
+        snapshot_pbr = pd.to_numeric(pd.Series([snapshot.get("pbr")]), errors="coerce").dropna()
+        snapshot_roe = pd.to_numeric(pd.Series([snapshot.get("roe")]), errors="coerce").dropna()
+        snapshot_eps = pd.to_numeric(pd.Series([snapshot.get("eps")]), errors="coerce").dropna()
+        snapshot_bps = pd.to_numeric(pd.Series([snapshot.get("bps")]), errors="coerce").dropna()
+        snapshot_dividend_yield = pd.to_numeric(pd.Series([snapshot.get("dividend_yield")]), errors="coerce").dropna()
+        per = float(snapshot_per.iloc[0]) if not snapshot_per.empty else calculated_per
+        pbr = float(snapshot_pbr.iloc[0]) if not snapshot_pbr.empty else calculated_pbr
+        roe = float(snapshot_roe.iloc[0]) if not snapshot_roe.empty else calculated_roe
+        latest_eps_for_output = float(snapshot_eps.iloc[0]) if not snapshot_eps.empty else latest_eps_value
+        latest_bps_for_output = float(snapshot_bps.iloc[0]) if not snapshot_bps.empty else np.nan
+        if not snapshot_dividend_yield.empty:
+            latest_dividend_yield = float(snapshot_dividend_yield.iloc[0])
 
         latest_debt = pd.to_numeric(pd.Series([latest.get("total_debt")]), errors="coerce").dropna()
+        total_liabilities = pd.to_numeric(pd.Series([latest.get("total_liabilities")]), errors="coerce").dropna()
         current_assets = pd.to_numeric(pd.Series([latest.get("current_assets")]), errors="coerce").dropna()
         current_liabilities = pd.to_numeric(pd.Series([latest.get("current_liabilities")]), errors="coerce").dropna()
         latest_debt_value = float(latest_debt.iloc[0]) if not latest_debt.empty else np.nan
+        total_liabilities_value = float(total_liabilities.iloc[0]) if not total_liabilities.empty else np.nan
         current_assets_value = float(current_assets.iloc[0]) if not current_assets.empty else np.nan
         current_liabilities_value = float(current_liabilities.iloc[0]) if not current_liabilities.empty else np.nan
 
+        debt_to_equity_base = total_liabilities_value if np.isfinite(total_liabilities_value) else latest_debt_value
         debt_to_equity = (
-            (float(latest_debt_value) / float(positive_latest_equity)) * 100.0
-            if np.isfinite(latest_debt_value) and positive_latest_equity is not None
+            (float(debt_to_equity_base) / float(positive_latest_equity)) * 100.0
+            if np.isfinite(debt_to_equity_base) and positive_latest_equity is not None
             else np.nan
         )
         current_ratio = (
@@ -215,6 +260,7 @@ def derive_shared_fundamental_metrics(
                 "price_date": price_date.strftime("%Y-%m-%d") if price_date is not None else None,
                 "market_cap_date": market_cap_date.strftime("%Y-%m-%d") if market_cap_date is not None else None,
                 "shares_date": shares_date.strftime("%Y-%m-%d") if shares_date is not None else None,
+                "dividend_yield_date": dividend_yield_date.strftime("%Y-%m-%d") if dividend_yield_date is not None else None,
                 "latest_fiscal_date": pd.Timestamp(latest["fiscal_date"]).strftime("%Y-%m-%d"),
                 "statement_count": int(len(ordered.index)),
                 "latest_price": latest_price if np.isfinite(latest_price) else np.nan,
@@ -222,12 +268,20 @@ def derive_shared_fundamental_metrics(
                 "shares_outstanding": latest_shares if np.isfinite(latest_shares) else np.nan,
                 "ttm_net_income": float(ttm_net_income) if np.isfinite(ttm_net_income) else np.nan,
                 "ttm_eps": float(ttm_eps) if np.isfinite(ttm_eps) else np.nan,
+                "latest_eps": latest_eps_for_output if np.isfinite(latest_eps_for_output) else np.nan,
+                "latest_bps": latest_bps_for_output if np.isfinite(latest_bps_for_output) else np.nan,
                 "roe": roe if np.isfinite(roe) else np.nan,
                 "per": per if np.isfinite(per) else np.nan,
                 "pbr": pbr if np.isfinite(pbr) else np.nan,
+                "calculated_roe": calculated_roe if np.isfinite(calculated_roe) else np.nan,
+                "calculated_per": calculated_per if np.isfinite(calculated_per) else np.nan,
+                "calculated_pbr": calculated_pbr if np.isfinite(calculated_pbr) else np.nan,
+                "valuation_source": str(snapshot.get("source") or "calculated") if not snapshot.empty else "calculated",
+                "dividend_yield": latest_dividend_yield if np.isfinite(latest_dividend_yield) else np.nan,
                 "latest_equity": latest_equity_value if np.isfinite(latest_equity_value) else np.nan,
                 "average_equity": average_equity if np.isfinite(average_equity) else np.nan,
                 "latest_debt": latest_debt_value if np.isfinite(latest_debt_value) else np.nan,
+                "total_liabilities": total_liabilities_value if np.isfinite(total_liabilities_value) else np.nan,
                 "current_assets": current_assets_value if np.isfinite(current_assets_value) else np.nan,
                 "current_liabilities": current_liabilities_value if np.isfinite(current_liabilities_value) else np.nan,
                 "debt_to_equity": debt_to_equity if np.isfinite(debt_to_equity) else np.nan,
@@ -242,6 +296,6 @@ def derive_shared_fundamental_metrics(
         return pd.DataFrame(), "not_available"
 
     frame = pd.DataFrame(rows).sort_values("symbol").reset_index(drop=True)
-    source_parts = [part for part in [quarterly_source, price_source, market_cap_source, shares_source] if part]
+    source_parts = [part for part in [snapshot_source, quarterly_source, price_source, market_cap_source, shares_source, dividend_yield_source] if part]
     source = " | ".join(dict.fromkeys(source_parts)) if source_parts else f"sqlite:{target.as_posix()}"
     return frame, source

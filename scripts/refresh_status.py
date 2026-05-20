@@ -26,6 +26,9 @@ def _print_stock(conn: sqlite3.Connection) -> None:
     row = _query(conn, "SELECT MAX(date), COUNT(*) FROM prices WHERE shares_outstanding IS NOT NULL")
     if row:
         print(f"shares_in_prices: max_date={row[0] or '-'} rows={row[1] or 0}")
+    row = _query(conn, "SELECT MAX(date), COUNT(*) FROM prices WHERE dividend_yield IS NOT NULL")
+    if row:
+        print(f"dividend_yield_in_prices: max_date={row[0] or '-'} rows={row[1] or 0}")
 
 
 def _print_quarterly(conn: sqlite3.Connection) -> None:

@@ -227,6 +227,24 @@ def load_shared_shares_outstanding_for_symbols(
     )
 
 
+def load_shared_dividend_yields_for_symbols(
+    symbols: list[str],
+    *,
+    start_date: str | pd.Timestamp,
+    end_date: str | pd.Timestamp | None = None,
+    shared_db_root: Path | str | None = None,
+    db_path: Path | str | None = None,
+) -> tuple[pd.DataFrame | None, str | None]:
+    return _metric_pivot(
+        symbols,
+        value_col="dividend_yield",
+        start_date=start_date,
+        end_date=end_date,
+        shared_db_root=shared_db_root,
+        db_path=db_path,
+    )
+
+
 def load_shared_adjusted_close_prices_for_symbols(
     symbols: list[str],
     *,
@@ -377,6 +395,39 @@ def load_shared_quarterly_fundamentals_for_symbols(
     if limit_per_symbol is not None and int(limit_per_symbol) > 0:
         frame = frame.groupby("symbol", as_index=False, group_keys=False).head(int(limit_per_symbol)).reset_index(drop=True)
     return frame, f"sqlite:{target.as_posix()}"
+
+
+def load_shared_fundamentals_snapshot_for_symbols(
+    symbols: list[str],
+    *,
+    shared_db_root: Path | str | None = None,
+    db_path: Path | str | None = None,
+) -> tuple[pd.DataFrame | None, str | None]:
+    normalized = _normalize_symbols(symbols)
+    if not normalized:
+        return None, None
+
+    target = _target_path(shared_db_root, db_path)
+    if not target.exists():
+        return None, None
+    _ensure_db(target)
+
+    placeholders = ",".join("?" for _ in normalized)
+    query = (
+        "SELECT symbol, as_of_date, market, per, pbr, roe, eps, bps, dividend_yield, "
+        "shares_outstanding, market_cap, source "
+        f"FROM fundamentals_snapshot WHERE symbol IN ({placeholders})"
+    )
+    try:
+        frame = _query(target, query, list(normalized))
+    except Exception:
+        return None, None
+    if frame.empty:
+        return None, None
+
+    for col in ["per", "pbr", "roe", "eps", "bps", "dividend_yield", "shares_outstanding", "market_cap"]:
+        frame[col] = pd.to_numeric(frame[col], errors="coerce")
+    return frame, f"sqlite:{target.as_posix()}:fundamentals_snapshot"
 
 
 def load_shared_krx_fs_rows_for_symbol(
