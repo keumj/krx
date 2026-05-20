@@ -3861,6 +3861,23 @@ def _latest_number(frame: pd.DataFrame, col: str) -> float | None:
     return value if np.isfinite(value) else None
 
 
+def _ttm_value(frame: pd.DataFrame, col: str) -> float:
+    if frame is None or frame.empty or col not in frame.columns:
+        return np.nan
+    ordered = frame.copy()
+    if "fiscal_date" in ordered.columns:
+        ordered["fiscal_date"] = pd.to_datetime(ordered["fiscal_date"], errors="coerce")
+        ordered = ordered.dropna(subset=["fiscal_date"]).sort_values("fiscal_date", ascending=False)
+    if ordered.empty:
+        return np.nan
+    latest = ordered.iloc[0]
+    latest_value = pd.to_numeric(pd.Series([latest.get(col)]), errors="coerce").dropna()
+    if str(latest.get("period_type") or "").strip().lower() == "annual":
+        return float(latest_value.iloc[0]) if not latest_value.empty else np.nan
+    values = pd.to_numeric(ordered.head(4).get(col), errors="coerce").dropna()
+    return float(values.sum(min_count=1)) if not values.empty else np.nan
+
+
 def _coalesce_fin_value(primary: object, fallback: object) -> object:
     if primary is None:
         return fallback
@@ -3971,8 +3988,8 @@ def _build_financial_context_krx(
 
     latest = quarterly.iloc[0] if not quarterly.empty else pd.Series(dtype=object)
     ttm_rows = quarterly.head(4) if not quarterly.empty else pd.DataFrame()
-    ttm_net_income = pd.to_numeric(ttm_rows.get("net_income"), errors="coerce").dropna().sum(min_count=1) if not ttm_rows.empty else np.nan
-    ttm_eps = pd.to_numeric(ttm_rows.get("diluted_eps"), errors="coerce").dropna().sum(min_count=1) if not ttm_rows.empty else np.nan
+    ttm_net_income = _ttm_value(quarterly, "net_income")
+    ttm_eps = _ttm_value(quarterly, "diluted_eps")
     average_equity = pd.to_numeric(ttm_rows.get("stockholders_equity"), errors="coerce").dropna().mean() if not ttm_rows.empty else np.nan
     latest_total_assets = _latest_number(quarterly, "total_assets")
     latest_equity = _latest_number(quarterly, "stockholders_equity")

@@ -43,6 +43,23 @@ def _last_value_on_or_before(series: pd.Series, as_of_ts: pd.Timestamp) -> tuple
     return pd.Timestamp(clean.index[-1]).normalize(), float(clean.iloc[-1])
 
 
+def _ttm_value(frame: pd.DataFrame, col: str) -> float:
+    if frame is None or frame.empty or col not in frame.columns:
+        return np.nan
+    ordered = frame.copy()
+    if "fiscal_date" in ordered.columns:
+        ordered["fiscal_date"] = pd.to_datetime(ordered["fiscal_date"], errors="coerce")
+        ordered = ordered.dropna(subset=["fiscal_date"]).sort_values("fiscal_date", ascending=False)
+    latest = ordered.iloc[0]
+    values = pd.to_numeric(ordered[col], errors="coerce").dropna()
+    if values.empty:
+        return np.nan
+    if str(latest.get("period_type") or "").strip().lower() == "annual":
+        latest_value = pd.to_numeric(pd.Series([latest.get(col)]), errors="coerce").dropna()
+        return float(latest_value.iloc[0]) if not latest_value.empty else np.nan
+    return float(values.head(4).sum(min_count=1))
+
+
 def derive_shared_fundamental_metrics(
     symbols: list[str],
     *,
@@ -141,8 +158,8 @@ def derive_shared_fundamental_metrics(
         ttm_rows = ordered.head(max(int(limit_per_symbol), 4)).copy()
         latest = ordered.iloc[0]
 
-        ttm_net_income = pd.to_numeric(ttm_rows["net_income"], errors="coerce").dropna().sum(min_count=1)
-        ttm_eps = pd.to_numeric(ttm_rows["diluted_eps"], errors="coerce").dropna().sum(min_count=1)
+        ttm_net_income = _ttm_value(ttm_rows, "net_income")
+        ttm_eps = _ttm_value(ttm_rows, "diluted_eps")
         equity_values = pd.to_numeric(ttm_rows["stockholders_equity"], errors="coerce").dropna()
         latest_equity = pd.to_numeric(pd.Series([latest.get("stockholders_equity")]), errors="coerce").dropna()
         latest_total_assets = pd.to_numeric(pd.Series([latest.get("total_assets")]), errors="coerce").dropna()
