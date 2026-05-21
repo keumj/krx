@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import io
+import json
 import os
 import re
 import signal
@@ -31,7 +32,9 @@ DEFAULT_COMPONENTS_CSV = Path("data/krx_components_full.csv")
 DEFAULT_REPORT_CODES = ("11013", "11012", "11014", "11011")
 DEFAULT_START_YEAR = 2019
 DEFAULT_PROGRESS_BATCH_SIZE = 200
+DEFAULT_PROGRESS_HEARTBEAT_SYMBOLS = 10
 DEFAULT_INCREMENTAL_OVERLAP_YEARS = 1
+DEFAULT_GUI_CONFIG_PATH = Path("data/krx_web_gui_config.json")
 _CANCEL_REQUESTED = False
 _DART_REQUEST_FAILURES = 0
 
@@ -192,6 +195,7 @@ def _read_registry_api_key() -> str:
 
     for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
         for subkey in (
+            r"Environment",
             r"Software\Keumj\KRX",
             r"Software\Keumj",
             r"Software\OpenDART",
@@ -230,6 +234,24 @@ def _read_registry_api_key() -> str:
     return ""
 
 
+def _read_gui_config_api_key() -> str:
+    for path in (
+        DEFAULT_GUI_CONFIG_PATH,
+        Path(__file__).resolve().parents[1] / DEFAULT_GUI_CONFIG_PATH,
+    ):
+        try:
+            if not path.exists() or not path.is_file():
+                continue
+            payload = json.loads(path.read_text(encoding="utf-8-sig"))
+        except Exception:
+            continue
+        if isinstance(payload, dict):
+            text = str(payload.get("dart_api_key", "")).strip()
+            if text:
+                return text
+    return ""
+
+
 def _load_api_key(explicit_api_key: str | None = None) -> str:
     candidate = str(explicit_api_key or "").strip()
     if candidate:
@@ -241,7 +263,10 @@ def _load_api_key(explicit_api_key: str | None = None) -> str:
     registry_value = _read_registry_api_key()
     if registry_value:
         return registry_value
-    raise RuntimeError("DART API key is required. Set KEUMJ_DART_API_KEY, pass --api-key, or save it in the registry.")
+    config_value = _read_gui_config_api_key()
+    if config_value:
+        return config_value
+    raise RuntimeError("DART API key is required. Set KEUMJ_DART_API_KEY, pass --api-key, save it in the GUI config, or save it in the registry.")
 
 
 def _load_components(path: Path) -> pd.DataFrame:
@@ -308,7 +333,7 @@ def _request_json(
     for attempt in range(1, 4):
         _raise_if_cancelled()
         try:
-            response = session.get(url, params=params, timeout=60)
+            response = session.get(url, params=params, timeout=30)
             response.raise_for_status()
             payload = response.json()
             if not isinstance(payload, dict):
@@ -325,7 +350,8 @@ def _request_json(
 
 
 def download_dart_corp_codes(session: requests.Session, api_key: str) -> pd.DataFrame:
-    response = session.get(CORP_CODES_URL, params={"crtfc_key": api_key}, timeout=120)
+    _log("corpCode download started")
+    response = session.get(CORP_CODES_URL, params={"crtfc_key": api_key}, timeout=45)
     response.raise_for_status()
     with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
         names = archive.namelist()
@@ -350,7 +376,9 @@ def download_dart_corp_codes(session: requests.Session, api_key: str) -> pd.Data
                 "reference_source": "dart:corpCode",
             }
         )
-    return pd.DataFrame(rows)
+    frame = pd.DataFrame(rows)
+    _log(f"corpCode download done rows={len(frame.index)}")
+    return frame
 
 
 def sync_krx_corp_codes(
@@ -360,6 +388,7 @@ def sync_krx_corp_codes(
     db_path: Path,
     components_csv: Path | None = None,
 ) -> int:
+    _log("corpCode sync started")
     if components_csv is not None and components_csv.exists():
         components = _load_components(components_csv)
         upsert_krx_securities(
@@ -397,8 +426,11 @@ def sync_krx_corp_codes(
             return 0
         raise
     if corp_codes.empty:
+        _log("corpCode sync done updates=0")
         return 0
-    return upsert_krx_securities(corp_codes, db_path=db_path)
+    updates = upsert_krx_securities(corp_codes, db_path=db_path)
+    _log(f"corpCode sync done updates={updates}")
+    return updates
 
 
 def _rcept_no_to_date_text(value: object) -> str | None:
@@ -512,9 +544,13 @@ def refresh_krx_dart_quarterly_fundamentals(
 ) -> KRXDartRefreshResult:
     global _DART_REQUEST_FAILURES
     _DART_REQUEST_FAILURES = 0
+    _log("loading DART API key")
     resolved_api_key = _load_api_key(api_key)
+    _log("DART API key loaded")
     configure_ssl(insecure_ssl=insecure_ssl, ca_bundle=ca_bundle)
+    _log("initializing SQLite schema")
     sqlite_result = init_krx_project_db(db_path=Path(db_path) if db_path is not None else None)
+    _log(f"SQLite ready db={sqlite_result.db_path}")
     session = requests.Session()
     try:
         corp_code_updates = sync_krx_corp_codes(
@@ -528,7 +564,12 @@ def refresh_krx_dart_quarterly_fundamentals(
         years = list(range(int(start_year), year_end + 1))
         if not years:
             raise RuntimeError("No years selected for DART fundamentals refresh")
+        _log(
+            f"selected_years={years[0]}-{years[-1]} report_codes={','.join(report_codes)} "
+            f"overlap_years={incremental_overlap_years}"
+        )
 
+        _log("loading active securities with corp_code")
         with sqlite3.connect(sqlite_result.db_path) as conn:
             securities = pd.read_sql_query(
                 """
@@ -544,8 +585,11 @@ def refresh_krx_dart_quarterly_fundamentals(
         component_symbols = _component_symbol_set(components_csv)
         if component_symbols and not securities.empty:
             securities = securities[securities["symbol"].map(_normalize_symbol).isin(component_symbols)].reset_index(drop=True)
+        _log(f"active securities loaded rows={len(securities.index)}")
 
+        _log("loading latest stored fiscal years")
         latest_years = _latest_fiscal_years(sqlite_result.db_path)
+        _log(f"latest fiscal years loaded symbols={len(latest_years)}")
         rows_to_store: list[dict[str, Any]] = []
         total_symbols = len(securities.index)
         batch_size = DEFAULT_PROGRESS_BATCH_SIZE
@@ -589,6 +633,15 @@ def refresh_krx_dart_quarterly_fundamentals(
                         batch_rows_found += 1
                     if pause_seconds > 0:
                         _interruptible_sleep(pause_seconds)
+            if index % DEFAULT_PROGRESS_HEARTBEAT_SYMBOLS == 0 and index % batch_size != 0 and index != total_symbols:
+                _batch_progress_log(
+                    batch_start_index=batch_start_index,
+                    batch_end_index=index,
+                    total_symbols=total_symbols,
+                    rows_found=batch_rows_found,
+                    skipped_symbols=batch_skipped_symbols,
+                    note="batch_progress",
+                )
             if index % batch_size == 0 or index == total_symbols:
                 _batch_progress_log(
                     batch_start_index=batch_start_index,

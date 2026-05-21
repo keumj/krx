@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import signal
 from pathlib import Path
 
@@ -31,6 +32,21 @@ def _report_types_from_codes(report_codes_text: str) -> tuple[tuple[str, str], .
     return tuple((label_by_code.get(code, code), code) for code in selected)
 
 
+def _incremental_start_year(args: argparse.Namespace) -> int:
+    if int(args.start_year) > 0:
+        return int(args.start_year)
+    end_year = int(args.end_year) if int(args.end_year) > 0 else 0
+    if end_year <= 0:
+        from datetime import datetime
+
+        end_year = datetime.now().year
+    return max(2024, end_year - max(int(args.overlap_years), 0))
+
+
+def _opendartreader_available() -> bool:
+    return importlib.util.find_spec("OpenDartReader") is not None
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Refresh KRX DART fundamentals. Default mode is incremental OpenDART CSV sync.")
     parser.add_argument("--components-csv", default=str(DEFAULT_COMPONENTS_CSV), help="KRX components CSV path")
@@ -46,6 +62,8 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--cache-dir", default=str(DEFAULT_BULK_CACHE_DIR), help="Directory containing downloaded DART ZIP files")
     parser.add_argument("--pause-seconds", type=float, default=0.5, help="Delay between requests/downloads")
+    parser.add_argument("--log-chunk-size", type=int, default=200, help="Incremental mode progress log interval")
+    parser.add_argument("--log-heartbeat-requests", type=int, default=25, help="Incremental mode short progress heartbeat interval")
     parser.add_argument("--ca-bundle", default="", help="CA bundle path for legacy API/bulk modes")
     parser.add_argument("--insecure-ssl", action="store_true", help="Disable TLS verification for temporary testing")
     parser.add_argument("--bulk-online", action="store_true", help="Try online DART bulk downloads in bulk mode")
@@ -70,6 +88,29 @@ def main() -> int:
 
         if mode == "incremental":
             _log("using incremental OpenDART CSV mode")
+            if not _opendartreader_available():
+                _log("OpenDartReader is not installed; falling back to official DART API incremental mode before CSV planning")
+                api_result = refresh_krx_dart_quarterly_fundamentals(
+                    components_csv=components_csv,
+                    db_path=db_path,
+                    api_key=str(args.api_key).strip() or None,
+                    start_year=_incremental_start_year(args),
+                    end_year=int(args.end_year) or None,
+                    report_codes=report_codes,
+                    incremental_overlap_years=int(args.overlap_years),
+                    pause_seconds=float(args.pause_seconds),
+                    insecure_ssl=bool(args.insecure_ssl),
+                    ca_bundle=str(args.ca_bundle).strip() or None,
+                )
+                print(
+                    "refreshed_krx_dart_auto_fundamentals",
+                    "mode=api-incremental",
+                    f"symbols={api_result.symbol_count}",
+                    f"corp_code_updates={api_result.corp_code_updates}",
+                    f"fundamentals_rows={api_result.fundamentals_rows}",
+                    f"sqlite_path={api_result.sqlite_path}",
+                )
+                return 0
             result = refresh_open_dart_krx_fs_incremental(
                 components_csv=components_csv,
                 db_path=db_path or Path("data/krx_shared_db/krx_shared_prices.sqlite"),
@@ -79,6 +120,8 @@ def main() -> int:
                 overlap_years=int(args.overlap_years),
                 report_types=_report_types_from_codes(str(args.report_codes)),
                 pause_seconds=float(args.pause_seconds),
+                log_chunk_size=int(args.log_chunk_size),
+                log_heartbeat_requests=int(args.log_heartbeat_requests),
                 force=bool(args.force),
                 sync_local_missing=not bool(args.skip_local_db_sync),
                 sync_fundamentals=not bool(args.skip_fundamentals_sync),

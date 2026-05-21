@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sqlite3
 import sys
@@ -37,6 +38,9 @@ DEFAULT_REPORT_TYPES: tuple[tuple[str, str], ...] = (
 )
 DEFAULT_OVERLAP_YEARS = 1
 MIN_VALID_CSV_BYTES = 200
+DEFAULT_PROGRESS_CHUNK_SIZE = 200
+DEFAULT_PROGRESS_HEARTBEAT_REQUESTS = 25
+DEFAULT_GUI_CONFIG_PATH = Path("data/krx_web_gui_config.json")
 
 
 @dataclass(frozen=True)
@@ -95,6 +99,7 @@ def _read_registry_api_key() -> str:
 
     for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
         for subkey in (
+            r"Environment",
             r"Software\Keumj\KRX",
             r"Software\Keumj",
             r"Software\OpenDART",
@@ -144,7 +149,18 @@ def _load_api_key(explicit_api_key: str | None = None) -> str:
     registry_value = _read_registry_api_key()
     if registry_value:
         return registry_value
-    raise RuntimeError("DART API key is required. Pass --api-key, set KEUMJ_DART_API_KEY, or save it in the registry.")
+    for path in (DEFAULT_GUI_CONFIG_PATH, PROJECT_ROOT / DEFAULT_GUI_CONFIG_PATH):
+        try:
+            if not path.exists() or not path.is_file():
+                continue
+            payload = json.loads(path.read_text(encoding="utf-8-sig"))
+        except Exception:
+            continue
+        if isinstance(payload, dict):
+            config_value = str(payload.get("dart_api_key", "")).strip()
+            if config_value:
+                return config_value
+    raise RuntimeError("DART API key is required. Pass --api-key, set KEUMJ_DART_API_KEY, save it in the GUI config, or save it in the registry.")
 
 
 def _load_open_dart_reader() -> Any:
@@ -359,6 +375,8 @@ def refresh_open_dart_krx_fs_incremental(
     pause_seconds: float = 0.5,
     max_retries: int = 3,
     max_symbols: int | None = None,
+    log_chunk_size: int = DEFAULT_PROGRESS_CHUNK_SIZE,
+    log_heartbeat_requests: int = DEFAULT_PROGRESS_HEARTBEAT_REQUESTS,
     include_preferred: bool = False,
     force: bool = False,
     sync_local_missing: bool = True,
@@ -417,8 +435,25 @@ def refresh_open_dart_krx_fs_incremental(
     OpenDartReader = _load_open_dart_reader()
     dart = OpenDartReader(_load_api_key(api_key))
     requests_attempted = 0
+    total_requests = len(plan)
+    chunk_size = max(1, int(log_chunk_size))
+    heartbeat_requests = max(1, int(log_heartbeat_requests))
+    _log(
+        f"planned_requests={total_requests} skipped_existing={skipped_existing} "
+        f"local_files_missing_db={len(locally_missing)} log_chunk_size={chunk_size} "
+        f"heartbeat_requests={heartbeat_requests}"
+    )
+    chunk_attempted_start = 0
+    chunk_saved_start = 0
+    chunk_empty_start = 0
+    chunk_failed_start = 0
     for index, (symbol, year, report_label, report_code) in enumerate(plan, start=1):
-        _log(f"{index}/{len(plan)} fetching symbol={symbol} year={year} report={report_label}")
+        if (index - 1) % chunk_size == 0:
+            chunk_attempted_start = requests_attempted
+            chunk_saved_start = len(saved_paths)
+            chunk_empty_start = empty_reports
+            chunk_failed_start = failed_reports
+            _log(f"chunk_started {index}-{min(index + chunk_size - 1, total_requests)}/{total_requests}")
         saved_path: Path | None = None
         for attempt in range(1, max(1, int(max_retries)) + 1):
             try:
@@ -444,6 +479,22 @@ def refresh_open_dart_krx_fs_incremental(
             saved_paths.append(saved_path)
         if pause_seconds > 0:
             time.sleep(float(pause_seconds))
+        if index % heartbeat_requests == 0 and index % chunk_size != 0 and index != total_requests:
+            _log(
+                f"progress {index}/{total_requests} "
+                f"attempted_total={requests_attempted} saved_files_total={len(saved_paths)} "
+                f"empty_total={empty_reports} failed_total={failed_reports} "
+                f"last_symbol={symbol} last_report={year}:{report_label}"
+            )
+        if index % chunk_size == 0 or index == total_requests:
+            _log(
+                f"chunk_done {index - ((index - 1) % chunk_size)}-{index}/{total_requests} "
+                f"attempted_chunk={requests_attempted - chunk_attempted_start} "
+                f"saved_files_chunk={len(saved_paths) - chunk_saved_start} "
+                f"empty_chunk={empty_reports - chunk_empty_start} "
+                f"failed_chunk={failed_reports - chunk_failed_start} "
+                f"attempted_total={requests_attempted} saved_files_total={len(saved_paths)}"
+            )
 
     paths_to_load = sorted({*locally_missing, *saved_paths})
     load_result = None
@@ -492,6 +543,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--pause-seconds", type=float, default=0.5, help="Delay between DART requests.")
     parser.add_argument("--max-retries", type=int, default=3, help="Retries per report request.")
     parser.add_argument("--max-symbols", type=int, default=0, help="Limit symbols for a trial run.")
+    parser.add_argument("--log-chunk-size", type=int, default=DEFAULT_PROGRESS_CHUNK_SIZE, help="Progress log interval in planned requests.")
+    parser.add_argument("--log-heartbeat-requests", type=int, default=DEFAULT_PROGRESS_HEARTBEAT_REQUESTS, help="Short progress heartbeat interval in planned requests.")
     parser.add_argument("--include-preferred", action="store_true", help="Include preferred/class shares.")
     parser.add_argument("--force", action="store_true", help="Fetch even when a matching local CSV or DB report already exists.")
     parser.add_argument("--skip-local-db-sync", action="store_true", help="Do not load local CSVs that are absent from SQLite.")
@@ -515,6 +568,8 @@ def main() -> int:
         pause_seconds=float(args.pause_seconds),
         max_retries=int(args.max_retries),
         max_symbols=int(args.max_symbols) or None,
+        log_chunk_size=int(args.log_chunk_size),
+        log_heartbeat_requests=int(args.log_heartbeat_requests),
         include_preferred=bool(args.include_preferred),
         force=bool(args.force),
         sync_local_missing=not bool(args.skip_local_db_sync),

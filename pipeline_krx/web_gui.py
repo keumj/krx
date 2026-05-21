@@ -104,7 +104,7 @@ def _load_gui_config(root_dir: Path) -> dict[str, object]:
     if not path.exists() or not path.is_file():
         return {}
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
     except Exception:
         return {}
     return payload if isinstance(payload, dict) else {}
@@ -454,6 +454,10 @@ def _build_refresh_steps(
             "1",
             "--pause-seconds",
             pause_seconds,
+            "--log-chunk-size",
+            "200",
+            "--log-heartbeat-requests",
+            "25",
         ]
         command.extend(_common_flags())
         env = {"KEUMJ_DART_API_KEY": str(api_key or "").strip()} if api_key else {}
