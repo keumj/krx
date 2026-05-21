@@ -113,6 +113,86 @@ def _sync_quarterly_shares_and_eps_from_prices(
     return int(conn.total_changes - before)
 
 
+def _repair_price_derived_fields_from_known_values(
+    conn: sqlite3.Connection,
+    *,
+    symbols: list[str] | tuple[str, ...] | set[str] | None = None,
+) -> int:
+    symbol_filter, params = _normalized_symbol_filter(symbols, "p")
+    previous_shares_lookup = """
+        (
+            SELECT p2.shares_outstanding
+            FROM prices AS p2
+            WHERE p2.symbol = p.symbol
+              AND p2.date <= p.date
+              AND p2.shares_outstanding IS NOT NULL
+              AND p2.shares_outstanding > 0
+            ORDER BY p2.date DESC
+            LIMIT 1
+        )
+    """
+    next_shares_lookup = """
+        (
+            SELECT p2.shares_outstanding
+            FROM prices AS p2
+            WHERE p2.symbol = p.symbol
+              AND p2.date >= p.date
+              AND p2.shares_outstanding IS NOT NULL
+              AND p2.shares_outstanding > 0
+            ORDER BY p2.date ASC
+            LIMIT 1
+        )
+    """
+    before = conn.total_changes
+    conn.execute(
+        f"""
+        UPDATE prices AS p
+        SET shares_outstanding = market_cap / close
+        WHERE shares_outstanding IS NULL
+          AND market_cap IS NOT NULL
+          AND market_cap > 0
+          AND close IS NOT NULL
+          AND close > 0
+        {symbol_filter}
+        """,
+        params,
+    )
+    conn.execute(
+        f"""
+        UPDATE prices AS p
+        SET shares_outstanding = {previous_shares_lookup}
+        WHERE shares_outstanding IS NULL
+          AND {previous_shares_lookup} IS NOT NULL
+        {symbol_filter}
+        """,
+        params,
+    )
+    conn.execute(
+        f"""
+        UPDATE prices AS p
+        SET shares_outstanding = {next_shares_lookup}
+        WHERE shares_outstanding IS NULL
+          AND {next_shares_lookup} IS NOT NULL
+        {symbol_filter}
+        """,
+        params,
+    )
+    conn.execute(
+        f"""
+        UPDATE prices AS p
+        SET market_cap = close * shares_outstanding
+        WHERE (market_cap IS NULL OR market_cap <= 0)
+          AND close IS NOT NULL
+          AND close > 0
+          AND shares_outstanding IS NOT NULL
+          AND shares_outstanding > 0
+        {symbol_filter}
+        """,
+        params,
+    )
+    return int(conn.total_changes - before)
+
+
 def _resolve_shared_root(shared_db_root: Path | str | None = None) -> Path:
     if shared_db_root is None:
         explicit_root = str(os.getenv("KEUMJ_KRX_DB_DIR", "")).strip()
@@ -522,6 +602,7 @@ def sync_krx_security_snapshot(
     frame: pd.DataFrame,
     *,
     as_of_date: str | None = None,
+    deactivate_all_missing: bool = False,
     db_path: Path | str | None = None,
     shared_db_root: Path | str | None = None,
 ) -> tuple[int, int]:
@@ -565,28 +646,41 @@ def sync_krx_security_snapshot(
             if (_normalize_text(record.get(cols.get("market"))) or "UNKNOWN") != "UNKNOWN"
         }
     )
-    if not active_symbols or not markets:
+    if not active_symbols:
         return upserted, 0
 
     with _connect(target) as conn:
         _ensure_schema(conn)
         before = conn.total_changes
-        market_placeholders = ",".join("?" for _ in markets)
         symbol_placeholders = ",".join("?" for _ in active_symbols)
-        params: list[object] = [snapshot_date, *markets, *active_symbols]
-        conn.execute(
-            f"""
-            UPDATE securities
-            SET
-                is_active = 0,
-                delisted_date = COALESCE(delisted_date, ?),
-                updated_at = CURRENT_TIMESTAMP
-            WHERE market IN ({market_placeholders})
-              AND is_active = 1
-              AND symbol NOT IN ({symbol_placeholders})
-            """,
-            params,
-        )
+        if deactivate_all_missing:
+            conn.execute(
+                f"""
+                UPDATE securities
+                SET
+                    is_active = 0,
+                    delisted_date = COALESCE(delisted_date, ?),
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE is_active = 1
+                  AND symbol NOT IN ({symbol_placeholders})
+                """,
+                [snapshot_date, *active_symbols],
+            )
+        elif markets:
+            market_placeholders = ",".join("?" for _ in markets)
+            conn.execute(
+                f"""
+                UPDATE securities
+                SET
+                    is_active = 0,
+                    delisted_date = COALESCE(delisted_date, ?),
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE market IN ({market_placeholders})
+                  AND is_active = 1
+                  AND symbol NOT IN ({symbol_placeholders})
+                """,
+                [snapshot_date, *markets, *active_symbols],
+            )
         conn.commit()
         deactivated = int(conn.total_changes - before)
     return upserted, deactivated
@@ -657,8 +751,18 @@ def upsert_krx_prices(
                 close=excluded.close,
                 volume=excluded.volume,
                 trading_value=excluded.trading_value,
-                market_cap=excluded.market_cap,
-                shares_outstanding=excluded.shares_outstanding,
+                market_cap=COALESCE(
+                    excluded.market_cap,
+                    CASE
+                        WHEN excluded.close IS NOT NULL
+                         AND excluded.close > 0
+                         AND COALESCE(excluded.shares_outstanding, prices.shares_outstanding) IS NOT NULL
+                         AND COALESCE(excluded.shares_outstanding, prices.shares_outstanding) > 0
+                        THEN excluded.close * COALESCE(excluded.shares_outstanding, prices.shares_outstanding)
+                        ELSE prices.market_cap
+                    END
+                ),
+                shares_outstanding=COALESCE(excluded.shares_outstanding, prices.shares_outstanding),
                 foreign_ownership_pct=excluded.foreign_ownership_pct,
                 adj_close=COALESCE(excluded.adj_close, prices.adj_close),
                 dividends=excluded.dividends,
@@ -670,7 +774,9 @@ def upsert_krx_prices(
             rows,
         )
         stored = int(conn.total_changes - before)
-        _sync_quarterly_shares_and_eps_from_prices(conn, symbols=[str(row[0]) for row in rows])
+        touched_symbols = [str(row[0]) for row in rows]
+        _repair_price_derived_fields_from_known_values(conn, symbols=touched_symbols)
+        _sync_quarterly_shares_and_eps_from_prices(conn, symbols=touched_symbols)
         conn.commit()
         return stored
 
@@ -847,6 +953,23 @@ def sync_krx_quarterly_shares_and_eps_from_prices(
     with _connect(target) as conn:
         _ensure_schema(conn)
         changed = _sync_quarterly_shares_and_eps_from_prices(conn, symbols=symbols)
+        conn.commit()
+        return changed
+
+
+def repair_krx_price_derived_fields(
+    *,
+    symbols: list[str] | tuple[str, ...] | set[str] | None = None,
+    db_path: Path | str | None = None,
+    shared_db_root: Path | str | None = None,
+) -> int:
+    target = Path(db_path) if db_path is not None else krx_prices_sqlite_path(shared_db_root)
+    if not target.exists() or not target.is_file():
+        return 0
+    with _connect(target) as conn:
+        _ensure_schema(conn)
+        changed = _repair_price_derived_fields_from_known_values(conn, symbols=symbols)
+        changed += _sync_quarterly_shares_and_eps_from_prices(conn, symbols=symbols)
         conn.commit()
         return changed
 

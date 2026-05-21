@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
+import os
 import signal
 import sqlite3
 import time
@@ -12,18 +15,18 @@ import pandas as pd
 
 from pipeline_common.security import configure_ssl
 
-from .db import init_krx_project_db, upsert_krx_fundamentals_snapshot, upsert_krx_prices, upsert_krx_securities
+from .db import (
+    init_krx_project_db,
+    sync_krx_security_snapshot,
+    upsert_krx_fundamentals_snapshot,
+    upsert_krx_prices,
+    upsert_krx_securities,
+)
 
 try:
     import FinanceDataReader as fdr
 except Exception:  # pragma: no cover - optional dependency
     fdr = None
-
-try:
-    from pykrx import stock as pykrx_stock
-except Exception:  # pragma: no cover - optional dependency
-    pykrx_stock = None
-
 
 DEFAULT_START_DATE = "2019-12-31"
 DEFAULT_COMPONENTS_CSV = Path("data/krx_components_full.csv")
@@ -133,8 +136,43 @@ def _read_components_csv(path: Path) -> pd.DataFrame:
     out["Symbol"] = out[symbol_col].map(_normalize_symbol)
     shares_col = cols.get("sharesoutstanding") or cols.get("shares_outstanding")
     out["SharesOutstanding"] = out[shares_col].map(_normalize_number) if shares_col is not None else None
+    market_cap_col = cols.get("marketcap") or cols.get("market_cap") or cols.get("marcap")
+    out["MarketCap"] = out[market_cap_col].map(_normalize_number) if market_cap_col is not None else None
     market_col = cols.get("market")
     out["Market"] = out[market_col].astype(str).str.strip().str.upper() if market_col is not None else "UNKNOWN"
+    return out
+
+
+def _load_current_listing_from_fdr() -> pd.DataFrame:
+    if fdr is None:
+        return pd.DataFrame()
+    try:
+        raw = fdr.StockListing("KRX")
+    except Exception as exc:
+        _log(f"current listing source unavailable: fdr.StockListing('KRX') error={type(exc).__name__}: {exc}")
+        return pd.DataFrame()
+    if raw is None or raw.empty:
+        return pd.DataFrame()
+
+    cols = {str(col).strip().lower(): col for col in raw.columns}
+    code_col = cols.get("code") or cols.get("symbol")
+    if code_col is None:
+        return pd.DataFrame()
+
+    out = pd.DataFrame()
+    out["Symbol"] = raw[code_col].map(_normalize_symbol)
+    out["Market"] = raw[cols["market"]].astype(str).str.strip().str.upper() if cols.get("market") is not None else "UNKNOWN"
+    if cols.get("name") is not None:
+        out["NameKR"] = raw[cols["name"]].astype(str).str.strip()
+    if cols.get("isu_cd") is not None:
+        out["ISIN"] = raw[cols["isu_cd"]].astype(str).str.strip()
+    stocks_col = cols.get("stocks") or cols.get("sharesoutstanding") or cols.get("shares_outstanding")
+    marcap_col = cols.get("marcap") or cols.get("marketcap") or cols.get("market_cap")
+    out["SharesOutstanding"] = raw[stocks_col].map(_normalize_number) if stocks_col is not None else None
+    out["MarketCap"] = raw[marcap_col].map(_normalize_number) if marcap_col is not None else None
+    out["ReferenceSource"] = "fdr:StockListing:KRX"
+    out = out[out["Symbol"].astype(str).str.strip() != ""]
+    out = out.drop_duplicates(subset=["Symbol"], keep="last").reset_index(drop=True)
     return out
 
 
@@ -160,7 +198,15 @@ def _load_components_from_sqlite(db_path: Path) -> pd.DataFrame:
                       AND p.shares_outstanding IS NOT NULL
                     ORDER BY p.date DESC
                     LIMIT 1
-                ) AS SharesOutstanding
+                ) AS SharesOutstanding,
+                (
+                    SELECT p.market_cap
+                    FROM prices AS p
+                    WHERE p.symbol = s.symbol
+                      AND p.market_cap IS NOT NULL
+                    ORDER BY p.date DESC
+                    LIMIT 1
+                ) AS MarketCap
             FROM securities AS s
             WHERE COALESCE(s.is_active, 1) = 1
               AND s.symbol IS NOT NULL
@@ -175,15 +221,22 @@ def _load_components_from_sqlite(db_path: Path) -> pd.DataFrame:
     frame["Symbol"] = frame["Symbol"].map(_normalize_symbol)
     frame["Market"] = frame["Market"].astype(str).str.strip().str.upper().replace({"": "UNKNOWN", "NONE": "UNKNOWN", "NAN": "UNKNOWN"})
     frame["SharesOutstanding"] = frame["SharesOutstanding"].map(_normalize_number)
+    if "MarketCap" in frame.columns:
+        frame["MarketCap"] = frame["MarketCap"].map(_normalize_number)
     return frame
 
 
-def _load_components(path: Path, *, db_path: Path | None = None) -> pd.DataFrame:
+def _load_components(path: Path, *, db_path: Path | None = None, prefer_current_listing: bool = True) -> tuple[pd.DataFrame, str]:
+    if prefer_current_listing:
+        listing = _load_current_listing_from_fdr()
+        if not listing.empty:
+            return listing, "fdr:StockListing:KRX"
+
     if db_path is not None:
         from_db = _load_components_from_sqlite(db_path)
         if not from_db.empty:
             _log(f"components source: sqlite:{db_path}:securities rows={len(from_db.index)}")
-            return from_db
+            return from_db, f"sqlite:{db_path}:securities"
 
     candidates = [path]
     for fallback in [Path("data/krx_components.csv"), Path("data/krx_kospi200_latest.csv")]:
@@ -192,7 +245,7 @@ def _load_components(path: Path, *, db_path: Path | None = None) -> pd.DataFrame
     for candidate in candidates:
         if candidate.exists() and candidate.is_file():
             _log(f"components source: csv:{candidate}")
-            return _read_components_csv(candidate)
+            return _read_components_csv(candidate), f"csv:{candidate}"
 
     raise FileNotFoundError(
         f"KRX components are missing from shared SQLite and no bootstrap CSV was found: {path}. "
@@ -251,7 +304,13 @@ def _standardize_price_frame(
 
 
 def _load_latest_krx_fundamental_metrics(symbols: list[str], *, end_date: str | None) -> tuple[dict[str, dict[str, float | None]], str | None]:
-    if pykrx_stock is None or not symbols:
+    if not symbols:
+        return {}, None
+    try:
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            from pykrx import stock as pykrx_stock
+    except Exception as exc:  # pragma: no cover - optional dependency
+        _log(f"fundamental snapshot unavailable: pykrx import failed ({type(exc).__name__})")
         return {}, None
 
     query_end = pd.Timestamp(end_date).normalize() if end_date else pd.Timestamp.today().normalize()
@@ -264,7 +323,8 @@ def _load_latest_krx_fundamental_metrics(symbols: list[str], *, end_date: str | 
         frames: list[pd.DataFrame] = []
         for market in ("KOSPI", "KOSDAQ", "KONEX"):
             try:
-                frame = pykrx_stock.get_market_fundamental(date_text, market=market)
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    frame = pykrx_stock.get_market_fundamental(date_text, market=market)
             except Exception:
                 continue
             if frame is not None and not frame.empty:
@@ -387,33 +447,46 @@ def refresh_krx_prices(
     shares_csv_path: Path = DEFAULT_SHARES_CSV,
     insecure_ssl: bool = False,
     ca_bundle: str | None = None,
+    refresh_fundamentals: bool = False,
 ) -> KRXPriceRefreshResult:
     if fdr is None:
         raise RuntimeError("FinanceDataReader is not installed")
 
     configure_ssl(insecure_ssl=insecure_ssl, ca_bundle=ca_bundle)
     sqlite_result = init_krx_project_db(db_path=Path(db_path) if db_path is not None else None)
-    components = _load_components(components_csv, db_path=sqlite_result.db_path)
-    upsert_krx_securities(
-        components.rename(
-            columns={
-                "Symbol": "symbol",
-                "Market": "market",
-                "NameKR": "name_kr",
-                "NameEN": "name_en",
-                "Sector": "sector",
-                "Industry": "industry",
-                "ListingDate": "listing_date",
-                "ReferenceSource": "reference_source",
-            }
-        ),
-        db_path=sqlite_result.db_path,
+    components, components_source = _load_components(components_csv, db_path=sqlite_result.db_path)
+    _log(f"components source: {components_source} rows={len(components.index)}")
+    securities_frame = components.rename(
+        columns={
+            "Symbol": "symbol",
+            "Market": "market",
+            "NameKR": "name_kr",
+            "NameEN": "name_en",
+            "ISIN": "isin",
+            "Sector": "sector",
+            "Industry": "industry",
+            "ListingDate": "listing_date",
+            "ReferenceSource": "reference_source",
+        }
     )
+    if components_source == "fdr:StockListing:KRX":
+        sync_krx_security_snapshot(
+            securities_frame,
+            deactivate_all_missing=True,
+            db_path=sqlite_result.db_path,
+        )
+    else:
+        upsert_krx_securities(securities_frame, db_path=sqlite_result.db_path)
 
     price_frames: list[pd.DataFrame] = []
     latest_dates = _latest_price_dates(sqlite_result.db_path)
     component_symbols = [_normalize_symbol(value) for value in components["Symbol"].tolist()]
-    fundamental_metrics, fundamental_date = _load_latest_krx_fundamental_metrics(component_symbols, end_date=end_date)
+    fundamental_metrics: dict[str, dict[str, float | None]] = {}
+    fundamental_date = None
+    if refresh_fundamentals:
+        fundamental_metrics, fundamental_date = _load_latest_krx_fundamental_metrics(component_symbols, end_date=end_date)
+    else:
+        _log("fundamental snapshot skipped; use --refresh-fundamentals to request pykrx PER/PBR/DPS/DIV.")
     if fundamental_metrics:
         snapshot_rows = [
             {
@@ -524,6 +597,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--shares-csv", default=str(DEFAULT_SHARES_CSV), help="Wide shares CSV output path")
     parser.add_argument("--ca-bundle", default="", help="CA bundle path")
     parser.add_argument("--insecure-ssl", action="store_true", help="Disable TLS verification for temporary testing")
+    parser.add_argument(
+        "--refresh-fundamentals",
+        action="store_true",
+        default=str(os.getenv("KRX_REFRESH_FUNDAMENTALS", "")).strip().lower() in {"1", "true", "yes", "y"},
+        help="Also refresh pykrx market fundamental snapshot. Disabled by default because pykrx often prints noisy upstream errors.",
+    )
     return parser.parse_args()
 
 
@@ -546,6 +625,7 @@ def main() -> int:
             shares_csv_path=Path(args.shares_csv),
             insecure_ssl=bool(args.insecure_ssl),
             ca_bundle=str(args.ca_bundle).strip() or None,
+            refresh_fundamentals=bool(args.refresh_fundamentals),
         )
     except KeyboardInterrupt:
         _log("Cancelled by user (Ctrl+C).")
