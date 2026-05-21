@@ -7,6 +7,7 @@ import os
 import signal
 import sqlite3
 import time
+import warnings
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
@@ -359,6 +360,50 @@ def _load_latest_krx_fundamental_metrics(symbols: list[str], *, end_date: str | 
     return {}, None
 
 
+def _load_latest_naver_dividend_metrics(symbols: list[str]) -> tuple[dict[str, dict[str, float | None]], str | None]:
+    wanted = {_normalize_symbol(symbol) for symbol in symbols if _normalize_symbol(symbol)}
+    if not wanted:
+        return {}, None
+    try:
+        from FinanceDataReader.naver.snap import marcap
+    except Exception as exc:
+        _log(f"naver dividend snapshot unavailable: import failed ({type(exc).__name__})")
+        return {}, None
+
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                frame = marcap("KRX", verbose=0)
+    except Exception as exc:
+        _log(f"naver dividend snapshot unavailable: marcap error={type(exc).__name__}: {exc}")
+        return {}, None
+    if frame is None or frame.empty or len(frame.columns) < 30:
+        return {}, None
+
+    out: dict[str, dict[str, float | None]] = {}
+    symbol_col = frame.columns[1]
+    close_col = frame.columns[3]
+    dividend_col = frame.columns[28]
+    for record in frame[[symbol_col, close_col, dividend_col]].to_dict(orient="records"):
+        symbol = _normalize_symbol(record.get(symbol_col))
+        if symbol not in wanted:
+            continue
+        dividend_per_share = _normalize_number(record.get(dividend_col))
+        close = _normalize_number(record.get(close_col))
+        if dividend_per_share is None or dividend_per_share <= 0:
+            continue
+        dividend_yield = (dividend_per_share / close * 100.0) if close is not None and close > 0 else None
+        out[symbol] = {
+            "dividend_per_share": dividend_per_share,
+            "dividend_yield": dividend_yield,
+        }
+    if out:
+        _log(f"naver dividend snapshot symbols={len(out)}")
+        return out, pd.Timestamp.today().normalize().strftime("%Y-%m-%d")
+    return {}, None
+
+
 def _latest_price_dates(db_path: Path) -> dict[str, str]:
     with sqlite3.connect(db_path) as conn:
         rows = conn.execute(
@@ -448,6 +493,7 @@ def refresh_krx_prices(
     insecure_ssl: bool = False,
     ca_bundle: str | None = None,
     refresh_fundamentals: bool = False,
+    refresh_dividends: bool = True,
 ) -> KRXPriceRefreshResult:
     if fdr is None:
         raise RuntimeError("FinanceDataReader is not installed")
@@ -487,11 +533,23 @@ def refresh_krx_prices(
         fundamental_metrics, fundamental_date = _load_latest_krx_fundamental_metrics(component_symbols, end_date=end_date)
     else:
         _log("fundamental snapshot skipped; use --refresh-fundamentals to request pykrx PER/PBR/DPS/DIV.")
+    dividend_metrics: dict[str, dict[str, float | None]] = {}
+    dividend_date = None
+    if refresh_dividends:
+        dividend_metrics, dividend_date = _load_latest_naver_dividend_metrics(component_symbols)
+        for symbol, metrics in dividend_metrics.items():
+            combined_metrics = fundamental_metrics.setdefault(symbol, {})
+            combined_metrics["dividend_per_share"] = metrics.get("dividend_per_share")
+            combined_metrics["dividend_yield"] = metrics.get("dividend_yield")
+    else:
+        _log("dividend snapshot skipped.")
     if fundamental_metrics:
         snapshot_rows = [
             {
                 "symbol": symbol,
-                "as_of_date": pd.Timestamp(fundamental_date).strftime("%Y-%m-%d") if fundamental_date else pd.Timestamp.today().normalize().strftime("%Y-%m-%d"),
+                "as_of_date": pd.Timestamp(fundamental_date or dividend_date).strftime("%Y-%m-%d")
+                if (fundamental_date or dividend_date)
+                else pd.Timestamp.today().normalize().strftime("%Y-%m-%d"),
                 "per": metrics.get("per"),
                 "pbr": metrics.get("pbr"),
                 "eps": metrics.get("eps"),
@@ -603,6 +661,11 @@ def _parse_args() -> argparse.Namespace:
         default=str(os.getenv("KRX_REFRESH_FUNDAMENTALS", "")).strip().lower() in {"1", "true", "yes", "y"},
         help="Also refresh pykrx market fundamental snapshot. Disabled by default because pykrx often prints noisy upstream errors.",
     )
+    parser.add_argument(
+        "--skip-dividends",
+        action="store_true",
+        help="Skip Naver dividend snapshot refresh.",
+    )
     return parser.parse_args()
 
 
@@ -626,6 +689,7 @@ def main() -> int:
             insecure_ssl=bool(args.insecure_ssl),
             ca_bundle=str(args.ca_bundle).strip() or None,
             refresh_fundamentals=bool(args.refresh_fundamentals),
+            refresh_dividends=not bool(args.skip_dividends),
         )
     except KeyboardInterrupt:
         _log("Cancelled by user (Ctrl+C).")

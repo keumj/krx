@@ -26,6 +26,71 @@ class KRXFsFundamentalsSyncResult:
     db_path: Path
 
 
+ACCOUNT_ID_CANDIDATES = {
+    "revenue": (
+        "ifrs-full_Revenue",
+        "ifrs-full_RevenueFromContractsWithCustomers",
+        "dart_Revenue",
+    ),
+    "operating_income": (
+        "dart_OperatingIncomeLoss",
+        "ifrs-full_ProfitLossFromOperatingActivities",
+    ),
+    "net_income": (
+        "ifrs-full_ProfitLoss",
+        "dart_NetIncomeLoss",
+    ),
+    "total_assets": (
+        "ifrs-full_Assets",
+        "dart_AssetsTotal",
+    ),
+    "total_liabilities": (
+        "ifrs-full_Liabilities",
+        "dart_LiabilitiesTotal",
+    ),
+    "stockholders_equity": (
+        "ifrs-full_Equity",
+        "dart_EquityTotal",
+    ),
+    "current_assets": (
+        "ifrs-full_CurrentAssets",
+        "dart_CurrentAssets",
+    ),
+    "current_liabilities": (
+        "ifrs-full_CurrentLiabilities",
+        "dart_CurrentLiabilities",
+    ),
+    "operating_cash_flow": (
+        "ifrs-full_CashFlowsFromUsedInOperatingActivities",
+        "dart_CashFlowsFromUsedInOperatingActivities",
+    ),
+    "capex": (
+        "ifrs-full_PurchaseOfPropertyPlantAndEquipmentClassifiedAsInvestingActivities",
+        "ifrs-full_PurchaseOfPropertyPlantAndEquipment",
+        "dart_PurchaseOfPropertyPlantAndEquipment",
+    ),
+}
+
+ACCOUNT_NAME_CANDIDATES = {
+    "revenue": ("매출액", "영업수익", "수익(매출액)", "수익"),
+    "operating_income": ("영업이익", "영업손익"),
+    "net_income": ("당기순이익", "분기순이익", "반기순이익", "연결당기순이익"),
+    "total_assets": ("자산총계",),
+    "total_liabilities": ("부채총계",),
+    "stockholders_equity": ("자본총계", "자본총액"),
+    "current_assets": ("유동자산",),
+    "current_liabilities": ("유동부채",),
+    "operating_cash_flow": ("영업활동현금흐름", "영업활동으로 인한 현금흐름"),
+    "capex": ("유형자산의 취득", "유형자산 취득"),
+}
+
+STATEMENT_KEYWORDS = {
+    "balance": ("재무상태", "Balance"),
+    "income": ("손익", "포괄손익", "Income", "Profit"),
+    "cashflow": ("현금흐름", "Cash"),
+}
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Transform raw krx_fs_rows in shared SQLite into normalized fundamentals_quarterly rows."
@@ -42,11 +107,6 @@ def _quote_ident(value: str) -> str:
     return '"' + str(value).replace('"', '""') + '"'
 
 
-def _contains_any(value: object, needles: tuple[str, ...]) -> bool:
-    text = str(value or "")
-    return any(needle in text for needle in needles)
-
-
 def _normalize_symbol(value: object) -> str:
     text = str(value or "").strip().upper()
     return text.zfill(6) if text.isdigit() else text
@@ -55,8 +115,13 @@ def _normalize_symbol(value: object) -> str:
 def _normalize_number(value: object) -> float | None:
     if value is None:
         return None
+    text = str(value).strip().replace(",", "")
+    if not text or text.lower() in {"nan", "none", "null", "n/a", "-"}:
+        return None
+    if text.startswith("(") and text.endswith(")"):
+        text = f"-{text[1:-1]}"
     try:
-        numeric = float(value)
+        numeric = float(text)
     except Exception:
         return None
     if not np.isfinite(numeric):
@@ -64,72 +129,64 @@ def _normalize_number(value: object) -> float | None:
     return numeric
 
 
-def _extract_fiscal_date(values: pd.Series) -> str | None:
-    for value in values.dropna().astype(str):
-        matches = re.findall(r"(20\d{2})[.\-/](\d{1,2})[.\-/](\d{1,2})", value)
-        if matches:
-            year, month, day = matches[-1]
-            return f"{int(year):04d}-{int(month):02d}-{int(day):02d}"
-    return None
-
-
-def _period_type(report_name: object) -> str:
-    text = str(report_name or "")
-    if "1분기" in text:
-        return "q1"
-    if "반기" in text:
-        return "half_year"
-    if "3분기" in text:
-        return "q3"
-    if "사업보고서" in text or "사업" in text:
-        return "annual"
-    return "quarterly"
+def _contains_any(value: object, needles: tuple[str, ...]) -> bool:
+    text = str(value or "")
+    return any(needle in text for needle in needles)
 
 
 def _preferred_statement_rows(frame: pd.DataFrame, keywords: tuple[str, ...]) -> pd.DataFrame:
+    if "statement_name" not in frame.columns:
+        return frame.copy()
     out = frame[frame["statement_name"].map(lambda value: _contains_any(value, keywords))].copy()
     if out.empty:
         return out
-    consolidation = out["consolidation"].astype(str)
-    if consolidation.str.contains("연결", na=False).any():
-        out = out[consolidation.str.contains("연결", na=False)].copy()
+    if "consolidation" in out.columns:
+        consolidation = out["consolidation"].astype(str)
+        if consolidation.str.contains("연결", na=False).any():
+            out = out[consolidation.str.contains("연결", na=False)].copy()
     return out
 
 
-def _pick_amount(
-    frame: pd.DataFrame,
-    *,
-    statement_keywords: tuple[str, ...],
-    account_candidates: tuple[str, ...],
-) -> float | None:
-    sub = _preferred_statement_rows(frame, statement_keywords)
+def _pick_amount(frame: pd.DataFrame, metric: str, statement_key: str) -> float | None:
+    sub = _preferred_statement_rows(frame, STATEMENT_KEYWORDS[statement_key])
     if sub.empty:
+        sub = frame.copy()
+
+    account_ids = ACCOUNT_ID_CANDIDATES.get(metric, ())
+    if account_ids and "account_id" in sub.columns:
+        id_series = sub["account_id"].astype(str)
+        for candidate in account_ids:
+            matched = sub[id_series == candidate]
+            values = pd.to_numeric(matched.get("amount"), errors="coerce").dropna()
+            if not values.empty:
+                return _normalize_number(values.iloc[0])
+
+    accounts = sub.get("account_name")
+    if accounts is None:
         return None
-    accounts = sub["account_name"].astype(str)
-    for candidate in account_candidates:
-        exact = sub[accounts == candidate]
-        if not exact.empty:
-            value = pd.to_numeric(exact["amount"], errors="coerce").dropna()
-            if not value.empty:
-                return _normalize_number(value.iloc[0])
-    for candidate in account_candidates:
-        contains = sub[accounts.str.contains(candidate, regex=False, na=False)]
-        if not contains.empty:
-            value = pd.to_numeric(contains["amount"], errors="coerce").dropna()
-            if not value.empty:
-                return _normalize_number(value.iloc[0])
+    account_text = accounts.astype(str)
+    for candidate in ACCOUNT_NAME_CANDIDATES.get(metric, ()):
+        exact = sub[account_text == candidate]
+        values = pd.to_numeric(exact.get("amount"), errors="coerce").dropna()
+        if not values.empty:
+            return _normalize_number(values.iloc[0])
+    for candidate in ACCOUNT_NAME_CANDIDATES.get(metric, ()):
+        contains = sub[account_text.str.contains(candidate, regex=False, na=False)]
+        values = pd.to_numeric(contains.get("amount"), errors="coerce").dropna()
+        if not values.empty:
+            return _normalize_number(values.iloc[0])
     return None
 
 
-def _sum_amounts(
+def _sum_named_amounts(
     frame: pd.DataFrame,
     *,
-    statement_keywords: tuple[str, ...],
+    statement_key: str,
     include_keywords: tuple[str, ...],
     exclude_keywords: tuple[str, ...] = (),
 ) -> float | None:
-    sub = _preferred_statement_rows(frame, statement_keywords)
-    if sub.empty:
+    sub = _preferred_statement_rows(frame, STATEMENT_KEYWORDS[statement_key])
+    if sub.empty or "account_name" not in sub.columns:
         return None
     accounts = sub["account_name"].astype(str)
     mask = pd.Series(False, index=sub.index)
@@ -143,87 +200,92 @@ def _sum_amounts(
     return _normalize_number(values.sum())
 
 
+def _period_type(report_name: object) -> str:
+    text = str(report_name or "").strip().lower()
+    if "q1" in text or "11013" in text or "1분기" in text:
+        return "q1"
+    if "half_year" in text or "half-year" in text or "11012" in text or "반기" in text:
+        return "half_year"
+    if "q3" in text or "11014" in text or "3분기" in text:
+        return "q3"
+    if "annual" in text or "11011" in text or "사업보고" in text:
+        return "annual"
+    return "quarterly"
+
+
+def _fallback_fiscal_date(report_year: object, period_type: str) -> str | None:
+    try:
+        year = int(report_year)
+    except Exception:
+        return None
+    suffix = {
+        "q1": "03-31",
+        "half_year": "06-30",
+        "q3": "09-30",
+        "annual": "12-31",
+    }.get(period_type, "12-31")
+    return f"{year:04d}-{suffix}"
+
+
+def _extract_fiscal_date(values: pd.Series) -> str | None:
+    for value in values.dropna().astype(str):
+        matches = re.findall(r"(20\d{2})[.\-/](\d{1,2})[.\-/](\d{1,2})", value)
+        if matches:
+            year, month, day = matches[-1]
+            return f"{int(year):04d}-{int(month):02d}-{int(day):02d}"
+    return None
+
+
 def _transform_report(frame: pd.DataFrame) -> dict[str, object] | None:
     frame = frame.copy()
-    frame["amount"] = pd.to_numeric(frame["amount"], errors="coerce")
+    frame["amount"] = frame["amount"].map(_normalize_number)
     frame = frame.dropna(subset=["amount"])
     if frame.empty:
         return None
 
     first = frame.iloc[0]
-    fiscal_date = _extract_fiscal_date(frame["period_label"])
+    period_type = _period_type(first.get("report_name"))
+    fiscal_date = _extract_fiscal_date(frame.get("period_label", pd.Series(dtype=object)))
+    fiscal_date = fiscal_date or _fallback_fiscal_date(first.get("report_year"), period_type)
     if fiscal_date is None:
         return None
 
-    total_assets = _pick_amount(
-        frame,
-        statement_keywords=("재무상태",),
-        account_candidates=("자산총계",),
-    )
-    total_liabilities = _pick_amount(
-        frame,
-        statement_keywords=("재무상태",),
-        account_candidates=("부채총계",),
-    )
-    stockholders_equity = _pick_amount(
-        frame,
-        statement_keywords=("재무상태",),
-        account_candidates=("자본총계", "자본총액"),
-    )
+    total_assets = _pick_amount(frame, "total_assets", "balance")
+    total_liabilities = _pick_amount(frame, "total_liabilities", "balance")
+    stockholders_equity = _pick_amount(frame, "stockholders_equity", "balance")
     if stockholders_equity is None and total_assets is not None and total_liabilities is not None:
         stockholders_equity = total_assets - total_liabilities
 
-    total_debt = _sum_amounts(
+    total_debt = _sum_named_amounts(
         frame,
-        statement_keywords=("재무상태",),
-        include_keywords=("차입금", "사채"),
-        exclude_keywords=("사채할인발행차금", "전환권조정", "신주인수권조정"),
+        statement_key="balance",
+        include_keywords=("차입", "사채"),
+        exclude_keywords=("할인발행차금", "전환권조정", "신주인수권조정"),
     )
+
+    operating_cash_flow = _pick_amount(frame, "operating_cash_flow", "cashflow")
+    capex = _pick_amount(frame, "capex", "cashflow")
+    free_cash_flow = None
+    if operating_cash_flow is not None and capex is not None:
+        free_cash_flow = operating_cash_flow - abs(capex)
+
     return {
         "symbol": _normalize_symbol(first.get("symbol")),
         "fiscal_date": fiscal_date,
         "filing_date": first.get("filing_date"),
-        "period_type": _period_type(first.get("report_name")),
-        "revenue": _pick_amount(
-            frame,
-            statement_keywords=("손익", "포괄손익"),
-            account_candidates=("매출액", "영업수익", "수익(매출액)", "수익"),
-        ),
-        "operating_income": _pick_amount(
-            frame,
-            statement_keywords=("손익", "포괄손익"),
-            account_candidates=("영업이익", "영업손익"),
-        ),
-        "net_income": _pick_amount(
-            frame,
-            statement_keywords=("손익", "포괄손익"),
-            account_candidates=("당기순이익", "분기순이익", "반기순이익", "연결당기순이익"),
-        ),
+        "period_type": period_type,
+        "revenue": _pick_amount(frame, "revenue", "income"),
+        "operating_income": _pick_amount(frame, "operating_income", "income"),
+        "net_income": _pick_amount(frame, "net_income", "income"),
         "total_assets": total_assets,
         "total_liabilities": total_liabilities,
         "stockholders_equity": stockholders_equity,
-        "current_assets": _pick_amount(
-            frame,
-            statement_keywords=("재무상태",),
-            account_candidates=("유동자산",),
-        ),
-        "current_liabilities": _pick_amount(
-            frame,
-            statement_keywords=("재무상태",),
-            account_candidates=("유동부채",),
-        ),
+        "current_assets": _pick_amount(frame, "current_assets", "balance"),
+        "current_liabilities": _pick_amount(frame, "current_liabilities", "balance"),
         "total_debt": total_debt,
-        "operating_cash_flow": _pick_amount(
-            frame,
-            statement_keywords=("현금흐름",),
-            account_candidates=("영업활동현금흐름", "영업활동으로 인한 현금흐름", "영업활동 순현금흐름"),
-        ),
-        "free_cash_flow": None,
-        "capex": _pick_amount(
-            frame,
-            statement_keywords=("현금흐름",),
-            account_candidates=("유형자산의 취득", "유형자산 취득", "유형자산의 증가"),
-        ),
+        "operating_cash_flow": operating_cash_flow,
+        "free_cash_flow": free_cash_flow,
+        "capex": capex,
         "shares_outstanding": None,
         "diluted_eps": None,
         "source": f"krx_fs_rows:{first.get('source_file')}",
@@ -303,51 +365,6 @@ def _attach_shares_and_eps(frame: pd.DataFrame, db_path: Path) -> pd.DataFrame:
     return out
 
 
-def _load_raw_rows(db_path: Path, raw_table: str, symbol: str | None, limit_reports: int | None) -> pd.DataFrame:
-    with sqlite3.connect(db_path) as conn:
-        exists = conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
-            (raw_table,),
-        ).fetchone()
-        if exists is None:
-            raise RuntimeError(f"Raw table not found: {raw_table}")
-
-        params: list[object] = []
-        where = ""
-        if symbol:
-            where = "WHERE symbol = ?"
-            params.append(_normalize_symbol(symbol))
-
-        if limit_reports is not None and int(limit_reports) > 0:
-            report_query = (
-                f"SELECT source_file FROM {_quote_ident(raw_table)} {where} "
-                "GROUP BY source_file ORDER BY MAX(filing_date) DESC, source_file DESC LIMIT ?"
-            )
-            report_rows = conn.execute(report_query, [*params, int(limit_reports)]).fetchall()
-            source_files = [str(row[0]) for row in report_rows]
-            if not source_files:
-                return pd.DataFrame()
-            placeholders = ",".join("?" for _ in source_files)
-            if where:
-                query = (
-                    f"SELECT * FROM {_quote_ident(raw_table)} "
-                    f"WHERE symbol = ? AND source_file IN ({placeholders}) "
-                    "ORDER BY symbol, source_file, source_row_number"
-                )
-                query_params = [*params, *source_files]
-            else:
-                query = (
-                    f"SELECT * FROM {_quote_ident(raw_table)} "
-                    f"WHERE source_file IN ({placeholders}) "
-                    "ORDER BY symbol, source_file, source_row_number"
-                )
-                query_params = source_files
-        else:
-            query = f"SELECT * FROM {_quote_ident(raw_table)} {where} ORDER BY symbol, source_file, source_row_number"
-            query_params = params
-        return pd.read_sql_query(query, conn, params=query_params)
-
-
 def _list_source_files(db_path: Path, raw_table: str, symbol: str | None, limit_reports: int | None) -> list[str]:
     params: list[object] = []
     where = ""
@@ -404,6 +421,7 @@ def _normalize_raw_columns(frame: pd.DataFrame) -> pd.DataFrame:
     required = [
         "symbol",
         "filing_date",
+        "report_year",
         "report_name",
         "source_file",
         "source_row_number",

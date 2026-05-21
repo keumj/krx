@@ -448,10 +448,10 @@ def _build_refresh_steps(
             "pipeline_krx.refresh_dart_auto_fundamentals",
             "--db-path",
             db_path,
-            "--start-year",
-            str(form.get("start_year", "2019") or "2019"),
             "--end-year",
             str(form.get("end_year", str(datetime.now().year)) or str(datetime.now().year)),
+            "--overlap-years",
+            "1",
             "--pause-seconds",
             pause_seconds,
         ]

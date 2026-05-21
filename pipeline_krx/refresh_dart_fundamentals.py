@@ -171,15 +171,77 @@ def _extract_date_text(value: object) -> str | None:
         return None
 
 
+def _read_registry_api_key() -> str:
+    try:
+        import winreg
+    except Exception:
+        return ""
+
+    candidates: list[tuple[object, str]] = []
+    env_path = str(os.getenv("DART_API_KEY_REGISTRY_PATH", "")).strip()
+    if env_path:
+        hive_name, _, subkey = env_path.partition("\\")
+        hive = {
+            "HKCU": winreg.HKEY_CURRENT_USER,
+            "HKEY_CURRENT_USER": winreg.HKEY_CURRENT_USER,
+            "HKLM": winreg.HKEY_LOCAL_MACHINE,
+            "HKEY_LOCAL_MACHINE": winreg.HKEY_LOCAL_MACHINE,
+        }.get(hive_name.upper())
+        if hive is not None and subkey:
+            candidates.append((hive, subkey))
+
+    for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+        for subkey in (
+            r"Software\Keumj\KRX",
+            r"Software\Keumj",
+            r"Software\OpenDART",
+            r"Software\OpenDartReader",
+            r"Software\DART",
+            r"Software\WOW6432Node\Keumj\KRX",
+            r"Software\WOW6432Node\OpenDART",
+            r"Software\WOW6432Node\DART",
+        ):
+            candidates.append((hive, subkey))
+
+    value_names = (
+        "KEUMJ_DART_API_KEY",
+        "DART_API_KEY",
+        "OPEN_DART_API_KEY",
+        "OPEN_DART_KEY",
+        "OpenDartApiKey",
+        "dart_api_key",
+        "api_key",
+        "API_KEY",
+        "crtfc_key",
+    )
+    for hive, subkey in candidates:
+        try:
+            with winreg.OpenKey(hive, subkey) as key:
+                for value_name in value_names:
+                    try:
+                        value, _value_type = winreg.QueryValueEx(key, value_name)
+                    except OSError:
+                        continue
+                    text = str(value or "").strip()
+                    if text:
+                        return text
+        except OSError:
+            continue
+    return ""
+
+
 def _load_api_key(explicit_api_key: str | None = None) -> str:
     candidate = str(explicit_api_key or "").strip()
     if candidate:
         return candidate
-    for env_name in ("KEUMJ_DART_API_KEY", "DART_API_KEY"):
+    for env_name in ("KEUMJ_DART_API_KEY", "DART_API_KEY", "OPEN_DART_API_KEY"):
         env_value = str(os.getenv(env_name, "")).strip()
         if env_value:
             return env_value
-    raise RuntimeError("DART API key is required. Set KEUMJ_DART_API_KEY or pass --api-key.")
+    registry_value = _read_registry_api_key()
+    if registry_value:
+        return registry_value
+    raise RuntimeError("DART API key is required. Set KEUMJ_DART_API_KEY, pass --api-key, or save it in the registry.")
 
 
 def _load_components(path: Path) -> pd.DataFrame:

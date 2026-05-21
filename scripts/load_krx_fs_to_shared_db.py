@@ -71,7 +71,8 @@ def _report_metadata(path: Path, fs_root: Path) -> dict[str, object]:
     if match:
         filing_date = f"{match.group('date')[:4]}-{match.group('date')[4:6]}-{match.group('date')[6:8]}"
         report_name = match.group("name")
-    year_match = re.search(r"(\d{4})년", report_name)
+
+    year_match = re.search(r"(20\d{2})", report_name)
     if year_match:
         report_year = int(year_match.group(1))
 
@@ -132,7 +133,11 @@ def _insert_rows(
         f"INSERT INTO {_quote_ident(table)} ({', '.join(_quote_ident(col) for col in columns)}) "
         f"VALUES ({', '.join('?' for _ in columns)}) "
         "ON CONFLICT(source_file, source_row_number) DO UPDATE SET "
-        + ", ".join(f"{_quote_ident(col)} = excluded.{_quote_ident(col)}" for col in columns if col not in {"source_file", "source_row_number"})
+        + ", ".join(
+            f"{_quote_ident(col)} = excluded.{_quote_ident(col)}"
+            for col in columns
+            if col not in {"source_file", "source_row_number"}
+        )
     )
 
     changed = 0
