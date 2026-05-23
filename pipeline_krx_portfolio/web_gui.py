@@ -718,12 +718,12 @@ def _risk_page(ctx: _PageContext) -> str:
     </div>
     <div class="grid-2" style="margin-bottom: 12px;">
       <div class="card feature-card table-card">
-        <h3>Relative Risk Decomposition</h3>
-        {_safe_table(getattr(dashboard, "relative_risk_decomposition", pd.DataFrame()) if dashboard else pd.DataFrame())}
-      </div>
-      <div class="card feature-card table-card">
         <h3>10D 99% VaR / Expected Shortfall</h3>
         {_safe_table(getattr(dashboard, "var_summary", pd.DataFrame()) if dashboard else pd.DataFrame())}
+      </div>
+      <div class="card feature-card table-card">
+        <h3>Relative Risk Decomposition</h3>
+        {_safe_table(getattr(dashboard, "relative_risk_decomposition", pd.DataFrame()) if dashboard else pd.DataFrame())}
       </div>
     </div>
     <div class="section-title">Risk Contribution</div>
