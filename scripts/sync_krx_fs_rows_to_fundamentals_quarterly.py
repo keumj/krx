@@ -90,6 +90,8 @@ STATEMENT_KEYWORDS = {
     "cashflow": ("현금흐름", "Cash"),
 }
 
+FLOW_METRICS = ("revenue", "operating_income", "net_income", "operating_cash_flow", "free_cash_flow", "capex")
+
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -147,17 +149,19 @@ def _preferred_statement_rows(frame: pd.DataFrame, keywords: tuple[str, ...]) ->
     return out
 
 
-def _pick_amount(frame: pd.DataFrame, metric: str, statement_key: str) -> float | None:
+def _pick_amount(frame: pd.DataFrame, metric: str, statement_key: str, *, amount_column: str = "amount") -> float | None:
     sub = _preferred_statement_rows(frame, STATEMENT_KEYWORDS[statement_key])
     if sub.empty:
         sub = frame.copy()
+    if amount_column not in sub.columns:
+        return None
 
     account_ids = ACCOUNT_ID_CANDIDATES.get(metric, ())
     if account_ids and "account_id" in sub.columns:
         id_series = sub["account_id"].astype(str)
         for candidate in account_ids:
             matched = sub[id_series == candidate]
-            values = pd.to_numeric(matched.get("amount"), errors="coerce").dropna()
+            values = pd.to_numeric(matched.get(amount_column), errors="coerce").dropna()
             if not values.empty:
                 return _normalize_number(values.iloc[0])
 
@@ -167,12 +171,12 @@ def _pick_amount(frame: pd.DataFrame, metric: str, statement_key: str) -> float 
     account_text = accounts.astype(str)
     for candidate in ACCOUNT_NAME_CANDIDATES.get(metric, ()):
         exact = sub[account_text == candidate]
-        values = pd.to_numeric(exact.get("amount"), errors="coerce").dropna()
+        values = pd.to_numeric(exact.get(amount_column), errors="coerce").dropna()
         if not values.empty:
             return _normalize_number(values.iloc[0])
     for candidate in ACCOUNT_NAME_CANDIDATES.get(metric, ()):
         contains = sub[account_text.str.contains(candidate, regex=False, na=False)]
-        values = pd.to_numeric(contains.get("amount"), errors="coerce").dropna()
+        values = pd.to_numeric(contains.get(amount_column), errors="coerce").dropna()
         if not values.empty:
             return _normalize_number(values.iloc[0])
     return None
@@ -269,7 +273,7 @@ def _transform_report(frame: pd.DataFrame) -> dict[str, object] | None:
     if operating_cash_flow is not None and capex is not None:
         free_cash_flow = operating_cash_flow - abs(capex)
 
-    return {
+    row = {
         "symbol": _normalize_symbol(first.get("symbol")),
         "fiscal_date": fiscal_date,
         "filing_date": first.get("filing_date"),
@@ -290,6 +294,15 @@ def _transform_report(frame: pd.DataFrame) -> dict[str, object] | None:
         "diluted_eps": None,
         "source": f"krx_fs_rows:{first.get('source_file')}",
     }
+    for metric, statement_key in (
+        ("revenue", "income"),
+        ("operating_income", "income"),
+        ("net_income", "income"),
+        ("operating_cash_flow", "cashflow"),
+        ("capex", "cashflow"),
+    ):
+        row[f"_cumulative_{metric}"] = _pick_amount(frame, metric, statement_key, amount_column="cumulative_amount")
+    return row
 
 
 def _attach_shares_and_eps(frame: pd.DataFrame, db_path: Path) -> pd.DataFrame:
@@ -362,6 +375,54 @@ def _attach_shares_and_eps(frame: pd.DataFrame, db_path: Path) -> pd.DataFrame:
     calculated_eps = net_income / shares_outstanding.where(shares_outstanding > 0.0)
     out["diluted_eps"] = existing_eps.combine_first(calculated_eps)
     out["fiscal_date"] = out["fiscal_date"].dt.strftime("%Y-%m-%d")
+    return out
+
+
+def _normalize_quarterly_flow_values(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty:
+        return frame
+    out = frame.copy()
+    out["_fiscal_year"] = out["fiscal_date"].astype(str).str.slice(0, 4)
+    converted = 0
+    for (_symbol, _fiscal_year), group in out.groupby(["symbol", "_fiscal_year"], dropna=False):
+        q3 = group[group["period_type"] == "q3"]
+        annual = group[group["period_type"] == "annual"]
+        if q3.empty or annual.empty:
+            continue
+        q3_row = q3.iloc[-1]
+        for annual_index in annual.index:
+            changed_any = False
+            for metric in FLOW_METRICS:
+                if metric not in out.columns:
+                    continue
+                annual_value = _normalize_number(out.at[annual_index, metric])
+                q3_cumulative = _normalize_number(q3_row.get(f"_cumulative_{metric}"))
+                if annual_value is None or q3_cumulative is None:
+                    continue
+                out.at[annual_index, metric] = annual_value - q3_cumulative
+                changed_any = True
+            if changed_any:
+                out.at[annual_index, "period_type"] = "q4"
+                out.at[annual_index, "source"] = f"{out.at[annual_index, 'source']}:q4_from_annual_minus_q3_cumulative"
+                converted += 1
+            else:
+                for metric in FLOW_METRICS:
+                    if metric in out.columns:
+                        out.at[annual_index, metric] = None
+                out.at[annual_index, "source"] = f"{out.at[annual_index, 'source']}:annual_flow_null_no_q3_cumulative"
+    helper_cols = [col for col in out.columns if str(col).startswith("_cumulative_") or col == "_fiscal_year"]
+    remaining_annual = out["period_type"] == "annual"
+    if remaining_annual.any():
+        for metric in FLOW_METRICS:
+            if metric in out.columns:
+                out.loc[remaining_annual, metric] = None
+        if "diluted_eps" in out.columns:
+            out.loc[remaining_annual, "diluted_eps"] = None
+        out.loc[remaining_annual, "source"] = out.loc[remaining_annual, "source"].astype(str) + ":annual_flow_null"
+    if helper_cols:
+        out = out.drop(columns=helper_cols)
+    if converted:
+        print(f"[krx-fs-fundamentals-sync] converted annual flow rows to q4 rows={converted}", flush=True)
     return out
 
 
@@ -467,6 +528,7 @@ def sync_krx_fs_rows_to_fundamentals_quarterly(
         if not rows:
             continue
         normalized = pd.DataFrame(rows)
+        normalized = _normalize_quarterly_flow_values(normalized)
         normalized = normalized.drop_duplicates(subset=["symbol", "fiscal_date", "period_type"], keep="last")
         normalized = _attach_shares_and_eps(normalized, db_path)
         transformed_rows += int(len(normalized.index))

@@ -341,7 +341,11 @@ def _save_report_csv(
     if "rcept_no" in report.columns and len(str(report["rcept_no"].iloc[0])) >= 8:
         submission_date = str(report["rcept_no"].iloc[0])[:8]
 
-    output_cols = [col for col in ["fs_nm", "account_id", "account_nm", "thstrm_dt", "thstrm_amount", "sj_nm"] if col in report.columns]
+    output_cols = [
+        col
+        for col in ["fs_nm", "account_id", "account_nm", "thstrm_dt", "thstrm_amount", "thstrm_add_amount", "sj_nm"]
+        if col in report.columns
+    ]
     out = report[output_cols].rename(
         columns={
             "fs_nm": "consolidation",
@@ -349,6 +353,7 @@ def _save_report_csv(
             "account_nm": "account_name",
             "thstrm_dt": "period_label",
             "thstrm_amount": "amount",
+            "thstrm_add_amount": "cumulative_amount",
             "sj_nm": "statement_name",
         }
     )

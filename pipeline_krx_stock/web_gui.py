@@ -3874,8 +3874,23 @@ def _ttm_value(frame: pd.DataFrame, col: str) -> float:
     latest_value = pd.to_numeric(pd.Series([latest.get(col)]), errors="coerce").dropna()
     if str(latest.get("period_type") or "").strip().lower() == "annual":
         return float(latest_value.iloc[0]) if not latest_value.empty else np.nan
-    values = pd.to_numeric(ordered.head(4).get(col), errors="coerce").dropna()
-    return float(values.sum(min_count=1)) if not values.empty else np.nan
+    non_annual = ordered[ordered.get("period_type", "").astype(str).str.strip().str.lower() != "annual"].head(4)
+    values = pd.to_numeric(non_annual.get(col), errors="coerce").dropna()
+    if len(values.index) < 4:
+        return np.nan
+    return float(values.sum(min_count=4))
+
+
+def _latest_period_type(frame: pd.DataFrame) -> str:
+    if frame is None or frame.empty or "period_type" not in frame.columns:
+        return ""
+    return str(frame.iloc[0].get("period_type") or "").strip().lower()
+
+
+def _safe_raw_flow_fallback(quarterly: pd.DataFrame, value: object) -> object:
+    if quarterly is None or quarterly.empty:
+        return value
+    return None if _latest_period_type(quarterly) == "annual" else value
 
 
 def _coalesce_fin_value(primary: object, fallback: object) -> object:
@@ -4064,9 +4079,9 @@ def _build_financial_context_krx(
 
     metrics = {
         "Market Cap": market_cap,
-        "PER (Trailing)": snapshot_per if snapshot_per is not None else trailing_per,
-        "PBR": snapshot_pbr if snapshot_pbr is not None else ((market_cap / latest_equity) if market_cap is not None and latest_equity not in (None, 0) else None),
-        "EPS (Trailing)": snapshot_eps if snapshot_eps is not None else trailing_eps,
+        "PER (Trailing)": trailing_per if trailing_per is not None else snapshot_per,
+        "PBR": ((market_cap / latest_equity) if market_cap is not None and latest_equity not in (None, 0) else None) or snapshot_pbr,
+        "EPS (Trailing)": trailing_eps if trailing_eps is not None else snapshot_eps,
         "ROE": (float(ttm_net_income) / float(average_equity)) if np.isfinite(ttm_net_income) and np.isfinite(average_equity) and float(average_equity) != 0 else None,
         "Debt/Equity": ((debt_to_equity_base / latest_equity) * 100.0) if debt_to_equity_base is not None and latest_equity not in (None, 0) else None,
         "Current Ratio": (current_assets / current_liabilities) if current_assets is not None and current_liabilities not in (None, 0) else None,
@@ -4109,13 +4124,13 @@ def _build_financial_context_krx(
     raw_fs_table = _raw_fs_recent_table(raw_fs, periods=periods)
     summary_table = pd.DataFrame(
         [
-            {"line_item": "Revenue", "latest_value": _coalesce_fin_value(latest.get("revenue") if not latest.empty else None, raw_revenue)},
-            {"line_item": "Operating Income", "latest_value": _coalesce_fin_value(latest.get("operating_income") if not latest.empty else None, raw_operating_income)},
-            {"line_item": "Net Income", "latest_value": _coalesce_fin_value(latest.get("net_income") if not latest.empty else None, raw_net_income)},
+            {"line_item": "Revenue", "latest_value": _coalesce_fin_value(latest.get("revenue") if not latest.empty else None, _safe_raw_flow_fallback(quarterly, raw_revenue))},
+            {"line_item": "Operating Income", "latest_value": _coalesce_fin_value(latest.get("operating_income") if not latest.empty else None, _safe_raw_flow_fallback(quarterly, raw_operating_income))},
+            {"line_item": "Net Income", "latest_value": _coalesce_fin_value(latest.get("net_income") if not latest.empty else None, _safe_raw_flow_fallback(quarterly, raw_net_income))},
             {"line_item": "Total Assets", "latest_value": _coalesce_fin_value(latest.get("total_assets") if not latest.empty else None, raw_total_assets)},
             {"line_item": "Total Liabilities", "latest_value": _coalesce_fin_value(latest.get("total_liabilities") if not latest.empty else None, raw_total_liabilities)},
             {"line_item": "Stockholders Equity", "latest_value": _coalesce_fin_value(latest.get("stockholders_equity") if not latest.empty else None, raw_equity)},
-            {"line_item": "Operating Cash Flow", "latest_value": _coalesce_fin_value(latest.get("operating_cash_flow") if not latest.empty else None, raw_operating_cash_flow)},
+            {"line_item": "Operating Cash Flow", "latest_value": _coalesce_fin_value(latest.get("operating_cash_flow") if not latest.empty else None, _safe_raw_flow_fallback(quarterly, raw_operating_cash_flow))},
             {"line_item": "Free Cash Flow", "latest_value": latest.get("free_cash_flow")},
         ]
     )

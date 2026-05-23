@@ -128,9 +128,9 @@ def _value_columns(frame: pd.DataFrame, statement_kind: str) -> list[str]:
     cols = [str(col) for col in frame.columns]
     current_cols = [col for col in cols if "당기" in col]
     if statement_kind in {"pl", "cf"}:
-        cumulative = [col for col in current_cols if "누적" in col]
-        if cumulative:
-            return cumulative
+        period_cols = [col for col in current_cols if "누적" not in col]
+        if period_cols:
+            return period_cols
     return current_cols or [col for col in cols if col in {"thstrm_amount", "당기"}]
 
 

@@ -57,7 +57,11 @@ def _ttm_value(frame: pd.DataFrame, col: str) -> float:
     if str(latest.get("period_type") or "").strip().lower() == "annual":
         latest_value = pd.to_numeric(pd.Series([latest.get(col)]), errors="coerce").dropna()
         return float(latest_value.iloc[0]) if not latest_value.empty else np.nan
-    return float(values.head(4).sum(min_count=1))
+    non_annual = ordered[ordered.get("period_type", "").astype(str).str.strip().str.lower() != "annual"].head(4)
+    values = pd.to_numeric(non_annual[col], errors="coerce").dropna()
+    if len(values.index) < 4:
+        return np.nan
+    return float(values.sum(min_count=4))
 
 
 def derive_shared_fundamental_metrics(
@@ -261,10 +265,10 @@ def derive_shared_fundamental_metrics(
         snapshot_eps = pd.to_numeric(pd.Series([snapshot.get("eps")]), errors="coerce").dropna()
         snapshot_bps = pd.to_numeric(pd.Series([snapshot.get("bps")]), errors="coerce").dropna()
         snapshot_dividend_yield = pd.to_numeric(pd.Series([snapshot.get("dividend_yield")]), errors="coerce").dropna()
-        per = float(snapshot_per.iloc[0]) if not snapshot_per.empty else calculated_per
-        pbr = float(snapshot_pbr.iloc[0]) if not snapshot_pbr.empty else calculated_pbr
-        roe = float(snapshot_roe.iloc[0]) if not snapshot_roe.empty else calculated_roe
-        latest_eps_for_output = float(snapshot_eps.iloc[0]) if not snapshot_eps.empty else latest_eps_value
+        per = calculated_per if np.isfinite(calculated_per) else (float(snapshot_per.iloc[0]) if not snapshot_per.empty else np.nan)
+        pbr = calculated_pbr if np.isfinite(calculated_pbr) else (float(snapshot_pbr.iloc[0]) if not snapshot_pbr.empty else np.nan)
+        roe = calculated_roe if np.isfinite(calculated_roe) else (float(snapshot_roe.iloc[0]) if not snapshot_roe.empty else np.nan)
+        latest_eps_for_output = latest_eps_value if np.isfinite(latest_eps_value) else (float(snapshot_eps.iloc[0]) if not snapshot_eps.empty else np.nan)
         latest_bps_for_output = float(snapshot_bps.iloc[0]) if not snapshot_bps.empty else np.nan
         if not snapshot_dividend_yield.empty:
             latest_dividend_yield = float(snapshot_dividend_yield.iloc[0])

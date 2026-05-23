@@ -26,6 +26,20 @@ def main() -> int:
     db_path = Path(args.db_path)
     listing = _load_current_listing_from_fdr()
     symbols = [_normalize_symbol(value) for value in listing.get("Symbol", pd.Series(dtype=object)).tolist()]
+    if not symbols and db_path.exists():
+        with sqlite3.connect(db_path) as conn:
+            rows = conn.execute(
+                """
+                SELECT DISTINCT symbol
+                FROM securities
+                WHERE COALESCE(is_active, 1) = 1
+                UNION
+                SELECT DISTINCT symbol
+                FROM prices
+                WHERE date = (SELECT MAX(date) FROM prices)
+                """
+            ).fetchall()
+        symbols = [_normalize_symbol(row[0]) for row in rows]
     metrics, metric_date = _load_latest_naver_dividend_metrics(symbols)
     if not metrics:
         print(f"refreshed_krx_dividends changed_snapshot_rows=0 changed_price_rows=0 db_path={db_path}")

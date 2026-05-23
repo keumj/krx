@@ -80,6 +80,7 @@ ACCOUNT_NAME_CANDIDATES = {
     "stockholders_equity": ("자본총계",),
     "operating_cash_flow": ("영업활동으로 인한 현금흐름", "영업활동현금흐름"),
 }
+FLOW_METRICS = ("revenue", "operating_income", "net_income", "operating_cash_flow", "free_cash_flow", "capex")
 
 
 @dataclass(frozen=True)
@@ -443,19 +444,19 @@ def _rcept_no_to_date_text(value: object) -> str | None:
     return f"{digits[:4]}-{digits[4:6]}-{digits[6:8]}"
 
 
-def _pick_account_value(rows: list[dict[str, Any]], metric: str) -> float | None:
+def _pick_account_value(rows: list[dict[str, Any]], metric: str, *, amount_column: str = "thstrm_amount") -> float | None:
     id_candidates = ACCOUNT_ID_CANDIDATES.get(metric, ())
     name_candidates = ACCOUNT_NAME_CANDIDATES.get(metric, ())
     for account_id in id_candidates:
         for row in rows:
             if str(row.get("account_id") or "").strip() == account_id:
-                value = _normalize_number(row.get("thstrm_amount"))
+                value = _normalize_number(row.get(amount_column))
                 if value is not None:
                     return value
     for account_name in name_candidates:
         for row in rows:
             if str(row.get("account_nm") or "").strip() == account_name:
-                value = _normalize_number(row.get("thstrm_amount"))
+                value = _normalize_number(row.get(amount_column))
                 if value is not None:
                     return value
     return None
@@ -509,7 +510,7 @@ def _fetch_financial_rows_for_report(
         fiscal_date = _extract_date_text(first_row.get("thstrm_dt"))
         if fiscal_date is None:
             continue
-        return {
+        row = {
             "symbol": _normalize_symbol(symbol),
             "fiscal_date": fiscal_date,
             "filing_date": _rcept_no_to_date_text(first_row.get("rcept_no")),
@@ -526,7 +527,58 @@ def _fetch_financial_rows_for_report(
             "diluted_eps": None,
             "source": f"dart:{report_code}:{fs_div}",
         }
+        for metric in FLOW_METRICS:
+            row[f"_cumulative_{metric}"] = _pick_account_value(rows, metric, amount_column="thstrm_add_amount")
+        return row
     return None
+
+
+def _normalize_quarterly_flow_values(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty:
+        return frame
+    out = frame.copy()
+    out["_fiscal_year"] = out["fiscal_date"].astype(str).str.slice(0, 4)
+    converted = 0
+    for (_symbol, _fiscal_year), group in out.groupby(["symbol", "_fiscal_year"], dropna=False):
+        q3 = group[group["period_type"] == "q3"]
+        annual = group[group["period_type"] == "annual"]
+        if q3.empty or annual.empty:
+            continue
+        q3_row = q3.iloc[-1]
+        for annual_index in annual.index:
+            changed_any = False
+            for metric in FLOW_METRICS:
+                if metric not in out.columns:
+                    continue
+                annual_value = _normalize_number(out.at[annual_index, metric])
+                q3_cumulative = _normalize_number(q3_row.get(f"_cumulative_{metric}"))
+                if annual_value is None or q3_cumulative is None:
+                    continue
+                out.at[annual_index, metric] = annual_value - q3_cumulative
+                changed_any = True
+            if changed_any:
+                out.at[annual_index, "period_type"] = "q4"
+                out.at[annual_index, "source"] = f"{out.at[annual_index, 'source']}:q4_from_annual_minus_q3_cumulative"
+                converted += 1
+            else:
+                for metric in FLOW_METRICS:
+                    if metric in out.columns:
+                        out.at[annual_index, metric] = None
+                out.at[annual_index, "source"] = f"{out.at[annual_index, 'source']}:annual_flow_null_no_q3_cumulative"
+    helper_cols = [col for col in out.columns if str(col).startswith("_cumulative_") or col == "_fiscal_year"]
+    remaining_annual = out["period_type"] == "annual"
+    if remaining_annual.any():
+        for metric in FLOW_METRICS:
+            if metric in out.columns:
+                out.loc[remaining_annual, metric] = None
+        if "diluted_eps" in out.columns:
+            out.loc[remaining_annual, "diluted_eps"] = None
+        out.loc[remaining_annual, "source"] = out.loc[remaining_annual, "source"].astype(str) + ":annual_flow_null"
+    if helper_cols:
+        out = out.drop(columns=helper_cols)
+    if converted:
+        _log(f"converted annual flow rows to q4 rows={converted}")
+    return out
 
 
 def refresh_krx_dart_quarterly_fundamentals(
@@ -658,6 +710,7 @@ def refresh_krx_dart_quarterly_fundamentals(
         stored = 0
         if rows_to_store:
             frame = pd.DataFrame(rows_to_store)
+            frame = _normalize_quarterly_flow_values(frame)
             frame = frame.drop_duplicates(subset=["symbol", "fiscal_date", "period_type"], keep="last")
             stored = upsert_krx_quarterly_fundamentals(frame, db_path=sqlite_result.db_path)
         if _DART_REQUEST_FAILURES:

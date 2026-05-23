@@ -935,6 +935,17 @@ def upsert_krx_quarterly_fundamentals(
             """,
             rows,
         )
+        q4_keys = [(row[0], row[1]) for row in rows if str(row[3]).strip().lower() == "q4"]
+        if q4_keys:
+            conn.executemany(
+                """
+                DELETE FROM fundamentals_quarterly
+                WHERE symbol = ?
+                  AND fiscal_date = ?
+                  AND period_type = 'annual'
+                """,
+                q4_keys,
+            )
         stored = int(conn.total_changes - before)
         _sync_quarterly_shares_and_eps_from_prices(conn, symbols=[str(row[0]) for row in rows])
         conn.commit()
