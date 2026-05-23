@@ -726,10 +726,6 @@ def _risk_page(ctx: _PageContext) -> str:
         {_safe_table(getattr(dashboard, "var_summary", pd.DataFrame()) if dashboard else pd.DataFrame())}
       </div>
     </div>
-    <div class="card table-card" style="margin-bottom: 12px;">
-      <h3>Stock Selection Risk Decomposition</h3>
-      {_safe_table(getattr(dashboard, "stock_selection_risk", pd.DataFrame()) if dashboard else pd.DataFrame(), max_rows=20)}
-    </div>
     <div class="section-title">Risk Contribution</div>
     <div class="grid-2" style="margin-bottom: 12px;">
       <div class="card">
@@ -758,6 +754,11 @@ def _risk_page(ctx: _PageContext) -> str:
         <h3>팩터 분해</h3>
         {_safe_table(dashboard.factor_risk if dashboard else pd.DataFrame())}
       </div>
+    </div>
+    <div class="section-title">Stock Selection Risk Detail</div>
+    <div class="card table-card" style="margin-bottom: 12px;">
+      <h3>Stock Selection Risk Decomposition</h3>
+      {_safe_table(getattr(dashboard, "stock_selection_risk", pd.DataFrame()) if dashboard else pd.DataFrame(), max_rows=20)}
     </div>
     """
     return _layout("Portfolio Lab | 리스크", "절대 리스크와 함께 KOSPI200 대비 tracking error, active risk, 스타일 노출을 함께 봅니다.", "risk", ctx, body)
