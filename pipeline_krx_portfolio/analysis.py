@@ -82,8 +82,12 @@ class PortfolioDashboard:
     attribution: pd.DataFrame
     stock_attribution: pd.DataFrame
     style_attribution: pd.DataFrame
+    relative_decomposition: pd.DataFrame
     risk_summary: pd.DataFrame
     relative_risk_summary: pd.DataFrame
+    relative_risk_decomposition: pd.DataFrame
+    var_summary: pd.DataFrame
+    incremental_var: pd.DataFrame
     risk_contribution: pd.DataFrame
     active_risk_contribution: pd.DataFrame
     factor_risk: pd.DataFrame
@@ -469,6 +473,17 @@ def _load_kospi200_benchmark_frame(
     max_symbols: int = 200,
 ) -> tuple[pd.DataFrame, str]:
     target = _shared_db_path(shared_db)
+
+    snapshot = load_latest_krx_benchmark_snapshot(DEFAULT_BENCHMARK_CODE, db_path=target)
+    if snapshot is not None and not snapshot.empty:
+        frame = snapshot.rename(columns={"symbol": "Symbol", "sector": "Sector"}).copy()
+        frame["Symbol"] = frame["Symbol"].astype(str).str.strip().str.upper()
+        frame["Sector"] = frame["Sector"].astype(str).str.strip().replace({"": "Unknown", "nan": "Unknown"})
+        frame["benchmark_weight"] = pd.to_numeric(frame.get("benchmark_weight"), errors="coerce")
+        frame = frame.dropna(subset=["Symbol"]).drop_duplicates(subset=["Symbol"], keep="first")
+        frame["benchmark_weight"] = _normalize_weights(frame.set_index("Symbol")["benchmark_weight"]).reindex(frame["Symbol"]).to_numpy()
+        return frame[["Symbol", "Sector", "benchmark_weight"]], f"sqlite:{target.as_posix()}:benchmark_constituents:{DEFAULT_BENCHMARK_CODE}"
+
     history = load_latest_index_constituent_history(DEFAULT_BENCHMARK_CODE, db_path=target)
     if history is not None and not history.empty:
         frame = history.rename(columns={"symbol": "Symbol", "sector": "Sector"}).copy()
@@ -483,15 +498,6 @@ def _load_kospi200_benchmark_frame(
             else 1.0 / len(frame.index)
         )
         return frame[["Symbol", "Sector", "benchmark_weight"]], f"sqlite:{target.as_posix()}:index_constituent_history:{DEFAULT_BENCHMARK_CODE}"
-
-    snapshot = load_latest_krx_benchmark_snapshot(DEFAULT_BENCHMARK_CODE, db_path=target)
-    if snapshot is not None and not snapshot.empty:
-        frame = snapshot.rename(columns={"symbol": "Symbol", "sector": "Sector"}).copy()
-        frame["Symbol"] = frame["Symbol"].astype(str).str.strip().str.upper()
-        frame["Sector"] = frame["Sector"].astype(str).str.strip().replace({"": "Unknown", "nan": "Unknown"})
-        frame["benchmark_weight"] = pd.to_numeric(frame.get("benchmark_weight"), errors="coerce")
-        frame = frame.dropna(subset=["Symbol"]).drop_duplicates(subset=["Symbol"], keep="first")
-        return frame[["Symbol", "Sector", "benchmark_weight"]], f"sqlite:{target.as_posix()}:benchmark_constituents:{DEFAULT_BENCHMARK_CODE}"
 
     if not target.exists():
         return pd.DataFrame(columns=["Symbol", "Sector", "benchmark_weight"]), "unavailable:kospi200_benchmark_missing"
@@ -1774,6 +1780,103 @@ def _build_relative_attribution_tables(
     return stock_attribution, sector_attribution, style_attribution
 
 
+def _build_relative_decomposition(stock_attribution: pd.DataFrame) -> pd.DataFrame:
+    if stock_attribution.empty:
+        return pd.DataFrame()
+    required = {
+        "ticker",
+        "sector",
+        "style_bucket",
+        "portfolio_weight_pct",
+        "benchmark_weight_pct",
+        "return_60d_pct",
+    }
+    if not required.issubset(set(stock_attribution.columns)):
+        return pd.DataFrame()
+
+    frame = stock_attribution.copy()
+    frame["portfolio_weight"] = pd.to_numeric(frame["portfolio_weight_pct"], errors="coerce").fillna(0.0) / 100.0
+    frame["benchmark_weight"] = pd.to_numeric(frame["benchmark_weight_pct"], errors="coerce").fillna(0.0) / 100.0
+    frame["return_pct"] = pd.to_numeric(frame["return_60d_pct"], errors="coerce").fillna(0.0)
+    frame["style_bucket"] = frame["style_bucket"].fillna("Unknown").astype(str)
+    frame["sector"] = frame["sector"].fillna("Unknown").astype(str)
+
+    portfolio_total_return = float((frame["portfolio_weight"] * frame["return_pct"]).sum())
+    benchmark_total_return = float((frame["benchmark_weight"] * frame["return_pct"]).sum())
+    active_return = portfolio_total_return - benchmark_total_return
+
+    style_allocation = 0.0
+    sector_allocation = 0.0
+    stock_selection = 0.0
+
+    for style, style_sub in frame.groupby("style_bucket", dropna=False):
+        p_style = float(style_sub["portfolio_weight"].sum())
+        b_style = float(style_sub["benchmark_weight"].sum())
+        rb_style = (
+            float((style_sub["benchmark_weight"] * style_sub["return_pct"]).sum() / b_style)
+            if b_style > 0.0
+            else benchmark_total_return
+        )
+        style_allocation += (p_style - b_style) * (rb_style - benchmark_total_return)
+
+        if p_style <= 0.0:
+            continue
+
+        for _sector, cell in style_sub.groupby("sector", dropna=False):
+            p_cell = float(cell["portfolio_weight"].sum())
+            b_cell = float(cell["benchmark_weight"].sum())
+            rb_cell = (
+                float((cell["benchmark_weight"] * cell["return_pct"]).sum() / b_cell)
+                if b_cell > 0.0
+                else rb_style
+            )
+            rp_cell = (
+                float((cell["portfolio_weight"] * cell["return_pct"]).sum() / p_cell)
+                if p_cell > 0.0
+                else rb_cell
+            )
+            p_within_style = p_cell / p_style if p_style > 0.0 else 0.0
+            b_within_style = b_cell / b_style if b_style > 0.0 else 0.0
+            sector_allocation += p_style * (p_within_style - b_within_style) * (rb_cell - rb_style)
+            stock_selection += p_cell * (rp_cell - rb_cell)
+
+    explained = style_allocation + sector_allocation + stock_selection
+    residual = active_return - explained
+    rows = [
+        {
+            "component": "Style Allocation",
+            "effect_pct": style_allocation,
+            "description": "Portfolio style weights versus benchmark style weights.",
+        },
+        {
+            "component": "Sector Allocation Within Style",
+            "effect_pct": sector_allocation,
+            "description": "Sector over/underweights after controlling for style buckets.",
+        },
+        {
+            "component": "Stock Selection",
+            "effect_pct": stock_selection,
+            "description": "Security-level return advantage inside each style/sector cell.",
+        },
+    ]
+    if abs(residual) > 1e-8:
+        rows.append(
+            {
+                "component": "Residual",
+                "effect_pct": residual,
+                "description": "Rounding and unavailable benchmark/style cells.",
+            }
+        )
+    rows.append(
+        {
+            "component": "Total Relative Return",
+            "effect_pct": active_return,
+            "description": "Portfolio return minus benchmark return over the attribution window.",
+        }
+    )
+    return pd.DataFrame(rows)
+
+
 def _build_risk_summary(
     positions: pd.DataFrame,
     holding_returns: pd.DataFrame,
@@ -1902,6 +2005,189 @@ def _build_active_risk_contribution(
     return frame[frame["active_weight_pct"].abs() > 1e-8].sort_values(
         "active_risk_contribution_pct", ascending=False
     ).reset_index(drop=True)
+
+
+def _historical_var_loss_pct(returns: pd.Series, *, horizon_days: int = 10, confidence: float = 0.99) -> tuple[float, float, int]:
+    clean = pd.to_numeric(returns, errors="coerce").dropna()
+    if clean.empty:
+        return np.nan, np.nan, 0
+    horizon_returns = (1.0 + clean).rolling(int(horizon_days)).apply(np.prod, raw=True) - 1.0
+    horizon_returns = horizon_returns.dropna()
+    if len(horizon_returns) < max(20, int(horizon_days) + 5):
+        return np.nan, np.nan, int(len(horizon_returns))
+    loss = -horizon_returns
+    var_loss = float(loss.quantile(float(confidence)))
+    tail = loss[loss >= var_loss]
+    es_loss = float(tail.mean()) if not tail.empty else np.nan
+    return var_loss * 100.0, es_loss * 100.0, int(len(horizon_returns))
+
+
+def _build_var_summary(portfolio_daily: pd.Series, benchmark_daily: pd.Series) -> pd.DataFrame:
+    portfolio_var, portfolio_es, portfolio_obs = _historical_var_loss_pct(portfolio_daily, horizon_days=10, confidence=0.99)
+    benchmark_var, benchmark_es, benchmark_obs = _historical_var_loss_pct(benchmark_daily, horizon_days=10, confidence=0.99)
+    return pd.DataFrame(
+        [
+            {
+                "series": "Portfolio",
+                "horizon_days": 10,
+                "confidence_pct": 99.0,
+                "var_loss_pct": portfolio_var,
+                "expected_shortfall_loss_pct": portfolio_es,
+                "observations": portfolio_obs,
+            },
+            {
+                "series": "Benchmark",
+                "horizon_days": 10,
+                "confidence_pct": 99.0,
+                "var_loss_pct": benchmark_var,
+                "expected_shortfall_loss_pct": benchmark_es,
+                "observations": benchmark_obs,
+            },
+        ]
+    )
+
+
+def _build_incremental_var(
+    positions: pd.DataFrame,
+    holding_returns: pd.DataFrame,
+    portfolio_daily: pd.Series,
+) -> pd.DataFrame:
+    if positions.empty or holding_returns.empty or portfolio_daily.empty:
+        return pd.DataFrame()
+    weights = _normalize_weights(positions.set_index("ticker")["market_value"])
+    math_returns = holding_returns.copy()
+    if "CASH" in weights.index and "CASH" not in math_returns.columns:
+        math_returns["CASH"] = 0.0
+    base_var, base_es, obs = _historical_var_loss_pct(portfolio_daily, horizon_days=10, confidence=0.99)
+    if not np.isfinite(base_var):
+        return pd.DataFrame()
+    rows: list[dict[str, object]] = []
+    sector_map = positions.set_index("ticker")["sector"].to_dict() if "sector" in positions.columns else {}
+    style_map = positions.set_index("ticker")["style_bucket"].to_dict() if "style_bucket" in positions.columns else {}
+    for ticker, weight in weights.items():
+        if ticker not in math_returns.columns:
+            continue
+        ticker_daily = pd.to_numeric(math_returns[ticker], errors="coerce").reindex(portfolio_daily.index).fillna(0.0)
+        without_daily = (pd.to_numeric(portfolio_daily, errors="coerce") - float(weight) * ticker_daily).dropna()
+        without_var, without_es, _ = _historical_var_loss_pct(without_daily, horizon_days=10, confidence=0.99)
+        if not np.isfinite(without_var):
+            continue
+        rows.append(
+            {
+                "ticker": ticker,
+                "sector": sector_map.get(ticker, "Unknown"),
+                "style_bucket": style_map.get(ticker, "Unknown"),
+                "portfolio_weight_pct": float(weight) * 100.0,
+                "var_10d_99_pct": base_var,
+                "var_without_position_pct": without_var,
+                "incremental_var_pct": base_var - without_var,
+                "expected_shortfall_without_position_pct": without_es,
+                "observations": obs,
+            }
+        )
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows).sort_values("incremental_var_pct", ascending=False).reset_index(drop=True)
+
+
+def _build_relative_risk_decomposition(
+    positions: pd.DataFrame,
+    benchmark_weights: pd.Series,
+    benchmark_close: pd.DataFrame,
+    sector_frame: pd.DataFrame,
+    *,
+    style_map: dict[str, str],
+) -> pd.DataFrame:
+    if positions.empty or benchmark_weights.empty or benchmark_close.empty:
+        return pd.DataFrame()
+    returns = benchmark_close.sort_index().pct_change(fill_method=None).dropna(how="all")
+    portfolio_weights = _normalize_weights(positions.set_index("ticker")["market_value"])
+    if "CASH" in portfolio_weights.index and "CASH" not in returns.columns:
+        returns["CASH"] = 0.0
+    symbols = [symbol for symbol in returns.columns if symbol in set(benchmark_weights.index).union(set(portfolio_weights.index))]
+    if not symbols:
+        return pd.DataFrame()
+
+    cov = returns[symbols].cov() * 252.0
+    cov_values = cov.to_numpy(dtype=float)
+    p = portfolio_weights.reindex(symbols).fillna(0.0)
+    b = benchmark_weights.reindex(symbols).fillna(0.0)
+    active = p - b
+    a = active.to_numpy(dtype=float)
+    te_var = float(a.T @ cov_values @ a)
+    if not np.isfinite(te_var) or te_var <= 0.0:
+        return pd.DataFrame()
+    te_vol = float(np.sqrt(te_var))
+
+    sector_lookup = dict(zip(sector_frame["Symbol"], sector_frame["Sector"]))
+    meta = pd.DataFrame(
+        {
+            "symbol": symbols,
+            "style_bucket": [style_map.get(symbol, "Unknown") if symbol != "CASH" else "Cash" for symbol in symbols],
+            "sector": [sector_lookup.get(symbol, "Unknown") if symbol != "CASH" else "Cash" for symbol in symbols],
+            "portfolio_weight": p.to_numpy(dtype=float),
+            "benchmark_weight": b.to_numpy(dtype=float),
+            "active_weight": active.to_numpy(dtype=float),
+        }
+    ).set_index("symbol")
+
+    style_component = pd.Series(0.0, index=symbols)
+    sector_component = pd.Series(0.0, index=symbols)
+    for style, sub in meta.groupby("style_bucket", dropna=False):
+        style_active = float(sub["active_weight"].sum())
+        style_benchmark = float(sub["benchmark_weight"].sum())
+        if abs(style_active) > 0.0:
+            if style_benchmark > 0.0:
+                style_component.loc[sub.index] = style_active * sub["benchmark_weight"] / style_benchmark
+            else:
+                style_component.loc[sub.index] = style_active / max(len(sub.index), 1)
+        for sector, cell in sub.groupby("sector", dropna=False):
+            cell_active = float(cell["active_weight"].sum())
+            cell_style_component = float(style_component.loc[cell.index].sum())
+            residual_cell_active = cell_active - cell_style_component
+            cell_benchmark = float(cell["benchmark_weight"].sum())
+            if abs(residual_cell_active) <= 0.0:
+                continue
+            if cell_benchmark > 0.0:
+                sector_component.loc[cell.index] = residual_cell_active * cell["benchmark_weight"] / cell_benchmark
+            else:
+                sector_component.loc[cell.index] = residual_cell_active / max(len(cell.index), 1)
+    stock_component = active - style_component - sector_component
+
+    def component_te(component: pd.Series) -> float:
+        vector = component.reindex(symbols).fillna(0.0).to_numpy(dtype=float)
+        return float(vector.T @ cov_values @ a / te_vol * 100.0)
+
+    style_te = component_te(style_component)
+    sector_te = component_te(sector_component)
+    stock_te = component_te(stock_component)
+    rows = [
+        {
+            "component": "Style Allocation Risk",
+            "te_component_pct": style_te,
+            "share_of_tracking_error_pct": style_te / (te_vol * 100.0) * 100.0 if te_vol > 0 else np.nan,
+            "description": "Tracking-error contribution from active style weights.",
+        },
+        {
+            "component": "Sector Allocation Within Style Risk",
+            "te_component_pct": sector_te,
+            "share_of_tracking_error_pct": sector_te / (te_vol * 100.0) * 100.0 if te_vol > 0 else np.nan,
+            "description": "Tracking-error contribution from sector active weights after style allocation.",
+        },
+        {
+            "component": "Stock-Specific Active Risk",
+            "te_component_pct": stock_te,
+            "share_of_tracking_error_pct": stock_te / (te_vol * 100.0) * 100.0 if te_vol > 0 else np.nan,
+            "description": "Residual security-selection tracking-error contribution.",
+        },
+        {
+            "component": "Total Tracking Error",
+            "te_component_pct": te_vol * 100.0,
+            "share_of_tracking_error_pct": 100.0,
+            "description": "Annualized tracking error; components above add to this value.",
+        },
+    ]
+    return pd.DataFrame(rows)
 
 
 def _fit_factor_split(asset: pd.Series, market: pd.Series, sector: pd.Series) -> tuple[float, float, float]:
@@ -2585,8 +2871,12 @@ def build_portfolio_dashboard(
             attribution=pd.DataFrame(),
             stock_attribution=pd.DataFrame(),
             style_attribution=pd.DataFrame(),
+            relative_decomposition=pd.DataFrame(),
             risk_summary=pd.DataFrame(),
             relative_risk_summary=pd.DataFrame(),
+            relative_risk_decomposition=pd.DataFrame(),
+            var_summary=pd.DataFrame(),
+            incremental_var=pd.DataFrame(),
             risk_contribution=pd.DataFrame(),
             active_risk_contribution=pd.DataFrame(),
             factor_risk=pd.DataFrame(),
@@ -2657,7 +2947,7 @@ def build_portfolio_dashboard(
         benchmark_weights=explicit_benchmark_weights,
     )
     direct_benchmark_daily, direct_benchmark_source = _direct_kospi200_daily_returns(start_ts, end_ts)
-    performance_benchmark_daily = direct_benchmark_daily if not direct_benchmark_daily.empty else benchmark_daily
+    performance_benchmark_daily = benchmark_daily
     style_map, _, style_source = _build_style_map(universe, shared_db=shared_db, as_of_date=end_ts)
     positions["style_bucket"] = positions["ticker"].map(style_map).fillna("Unknown")
     holdings_performance["style_bucket"] = holdings_performance["ticker"].map(style_map).fillna("Unknown")
@@ -2669,6 +2959,7 @@ def build_portfolio_dashboard(
         benchmark_sector_frame,
         style_map=style_map,
     )
+    relative_decomposition = _build_relative_decomposition(stock_attribution)
     holding_returns = _holding_returns(close_history)
     risk_summary, risk_contribution, relative_risk_summary = _build_risk_summary(
         positions, holding_returns, portfolio_daily, performance_benchmark_daily
@@ -2680,6 +2971,15 @@ def build_portfolio_dashboard(
         benchmark_sector_frame,
         style_map=style_map,
     )
+    relative_risk_decomposition = _build_relative_risk_decomposition(
+        positions,
+        benchmark_weights,
+        benchmark_close,
+        benchmark_sector_frame,
+        style_map=style_map,
+    )
+    var_summary = _build_var_summary(portfolio_daily, performance_benchmark_daily)
+    incremental_var = _build_incremental_var(positions, holding_returns, portfolio_daily)
     factor_risk = _build_factor_risk(
         positions,
         risk_contribution,
@@ -2757,7 +3057,8 @@ def build_portfolio_dashboard(
         "benchmark_component_source": benchmark_component_source,
         "price_source": position_sources.get("price_source", "sqlite"),
         "benchmark_price_source": benchmark_sources.get("price_source", "sqlite"),
-        "performance_benchmark_source": direct_benchmark_source if not direct_benchmark_daily.empty else benchmark_sources.get("price_source", "sqlite"),
+        "performance_benchmark_source": benchmark_component_source,
+        "direct_kospi200_index_source": direct_benchmark_source,
         "financial_metric_source": financial_source,
         "style_source": style_source,
         "cash_warning": cash_warning,
@@ -2773,8 +3074,12 @@ def build_portfolio_dashboard(
         attribution=attribution,
         stock_attribution=stock_attribution,
         style_attribution=style_attribution,
+        relative_decomposition=relative_decomposition,
         risk_summary=risk_summary,
         relative_risk_summary=relative_risk_summary,
+        relative_risk_decomposition=relative_risk_decomposition,
+        var_summary=var_summary,
+        incremental_var=incremental_var,
         risk_contribution=risk_contribution,
         active_risk_contribution=active_risk_contribution,
         factor_risk=factor_risk,

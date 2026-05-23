@@ -182,6 +182,61 @@ def _pick_amount(frame: pd.DataFrame, metric: str, statement_key: str, *, amount
     return None
 
 
+def _pick_period_label(frame: pd.DataFrame, metric: str, statement_key: str) -> str | None:
+    sub = _preferred_statement_rows(frame, STATEMENT_KEYWORDS[statement_key])
+    if sub.empty:
+        sub = frame.copy()
+    if "period_label" not in sub.columns:
+        return None
+
+    account_ids = ACCOUNT_ID_CANDIDATES.get(metric, ())
+    if account_ids and "account_id" in sub.columns:
+        id_series = sub["account_id"].astype(str)
+        for candidate in account_ids:
+            matched = sub[id_series == candidate]
+            labels = matched.get("period_label")
+            if labels is not None and not labels.dropna().empty:
+                return str(labels.dropna().iloc[0])
+
+    accounts = sub.get("account_name")
+    if accounts is None:
+        return None
+    account_text = accounts.astype(str)
+    for candidate in ACCOUNT_NAME_CANDIDATES.get(metric, ()):
+        exact = sub[account_text == candidate]
+        labels = exact.get("period_label")
+        if labels is not None and not labels.dropna().empty:
+            return str(labels.dropna().iloc[0])
+    for candidate in ACCOUNT_NAME_CANDIDATES.get(metric, ()):
+        contains = sub[account_text.str.contains(candidate, regex=False, na=False)]
+        labels = contains.get("period_label")
+        if labels is not None and not labels.dropna().empty:
+            return str(labels.dropna().iloc[0])
+    return None
+
+
+def _is_year_to_date_period_label(value: object, period_type: str) -> bool:
+    text = str(value or "")
+    if "~" not in text:
+        return False
+    dates = re.findall(r"(20\d{2})[.\-/](\d{1,2})[.\-/](\d{1,2})", text)
+    if len(dates) < 2:
+        return False
+    start_year, start_month, start_day = dates[0]
+    end_year, end_month, end_day = dates[-1]
+    if start_year != end_year or int(start_month) != 1 or int(start_day) != 1:
+        return False
+    expected_end = {
+        "q1": (3, 31),
+        "half_year": (6, 30),
+        "q3": (9, 30),
+        "annual": (12, 31),
+    }.get(period_type)
+    if expected_end is None:
+        return False
+    return (int(end_month), int(end_day)) == expected_end
+
+
 def _sum_named_amounts(
     frame: pd.DataFrame,
     *,
@@ -302,6 +357,11 @@ def _transform_report(frame: pd.DataFrame) -> dict[str, object] | None:
         ("capex", "cashflow"),
     ):
         row[f"_cumulative_{metric}"] = _pick_amount(frame, metric, statement_key, amount_column="cumulative_amount")
+        row[f"_is_ytd_{metric}"] = _is_year_to_date_period_label(
+            _pick_period_label(frame, metric, statement_key),
+            period_type,
+        )
+    row["_is_ytd_free_cash_flow"] = bool(row.get("_is_ytd_operating_cash_flow")) and bool(row.get("_is_ytd_capex"))
     return row
 
 
@@ -328,7 +388,7 @@ def _attach_shares_and_eps(frame: pd.DataFrame, db_path: Path) -> pd.DataFrame:
         "ORDER BY symbol, date"
     )
     params: list[object] = [*symbols, pd.Timestamp(max_fiscal_date).strftime("%Y-%m-%d")]
-    with sqlite3.connect(db_path) as conn:
+    with sqlite3.connect(db_path, timeout=60.0) as conn:
         shares = pd.read_sql_query(query, conn, params=params)
     if shares.empty:
         out["fiscal_date"] = out["fiscal_date"].dt.strftime("%Y-%m-%d")
@@ -383,34 +443,71 @@ def _normalize_quarterly_flow_values(frame: pd.DataFrame) -> pd.DataFrame:
         return frame
     out = frame.copy()
     out["_fiscal_year"] = out["fiscal_date"].astype(str).str.slice(0, 4)
-    converted = 0
+    converted_q4 = 0
+    labeled_q2 = 0
+
+    def cumulative_value(row: pd.Series, metric: str) -> float | None:
+        value = _normalize_number(row.get(f"_cumulative_{metric}"))
+        if value is not None:
+            return value
+        return None
+
     for (_symbol, _fiscal_year), group in out.groupby(["symbol", "_fiscal_year"], dropna=False):
+        q1 = group[group["period_type"] == "q1"]
+        half_year = group[group["period_type"] == "half_year"]
         q3 = group[group["period_type"] == "q3"]
         annual = group[group["period_type"] == "annual"]
-        if q3.empty or annual.empty:
+
+        q1_row = q1.iloc[-1] if not q1.empty else None
+        half_year_row = half_year.iloc[-1] if not half_year.empty else None
+        q3_row = q3.iloc[-1] if not q3.empty else None
+
+        for half_year_index in half_year.index:
+            out.at[half_year_index, "period_type"] = "q2"
+            out.at[half_year_index, "source"] = f"{out.at[half_year_index, 'source']}:q2_from_half_year_current_amount"
+            labeled_q2 += 1
+
+        if q3_row is None or annual.empty:
+            for annual_index in annual.index:
+                for metric in FLOW_METRICS:
+                    if metric in out.columns:
+                        out.at[annual_index, metric] = None
+                out.at[annual_index, "source"] = f"{out.at[annual_index, 'source']}:annual_flow_null_no_q3_cumulative"
             continue
-        q3_row = q3.iloc[-1]
+
         for annual_index in annual.index:
             changed_any = False
             for metric in FLOW_METRICS:
                 if metric not in out.columns:
                     continue
                 annual_value = _normalize_number(out.at[annual_index, metric])
-                q3_cumulative = _normalize_number(q3_row.get(f"_cumulative_{metric}"))
+                q3_cumulative = cumulative_value(q3_row, metric)
+                if q3_cumulative is None and q1_row is not None and half_year_row is not None:
+                    prior_values = [
+                        _normalize_number(q1_row.get(metric)),
+                        _normalize_number(half_year_row.get(metric)),
+                        _normalize_number(q3_row.get(metric)),
+                    ]
+                    if all(value is not None for value in prior_values):
+                        q3_cumulative = sum(value for value in prior_values if value is not None)
                 if annual_value is None or q3_cumulative is None:
                     continue
                 out.at[annual_index, metric] = annual_value - q3_cumulative
                 changed_any = True
             if changed_any:
                 out.at[annual_index, "period_type"] = "q4"
-                out.at[annual_index, "source"] = f"{out.at[annual_index, 'source']}:q4_from_annual_minus_q3_cumulative"
-                converted += 1
+                out.at[annual_index, "source"] = f"{out.at[annual_index, 'source']}:q4_from_annual_minus_prior_quarters"
+                converted_q4 += 1
             else:
                 for metric in FLOW_METRICS:
                     if metric in out.columns:
                         out.at[annual_index, metric] = None
                 out.at[annual_index, "source"] = f"{out.at[annual_index, 'source']}:annual_flow_null_no_q3_cumulative"
-    helper_cols = [col for col in out.columns if str(col).startswith("_cumulative_") or col == "_fiscal_year"]
+    helper_cols = [
+        col
+        for col in out.columns
+        if str(col).startswith("_cumulative_") or str(col).startswith("_is_ytd_") or col == "_fiscal_year"
+    ]
     remaining_annual = out["period_type"] == "annual"
     if remaining_annual.any():
         for metric in FLOW_METRICS:
@@ -421,8 +518,12 @@ def _normalize_quarterly_flow_values(frame: pd.DataFrame) -> pd.DataFrame:
         out.loc[remaining_annual, "source"] = out.loc[remaining_annual, "source"].astype(str) + ":annual_flow_null"
     if helper_cols:
         out = out.drop(columns=helper_cols)
-    if converted:
-        print(f"[krx-fs-fundamentals-sync] converted annual flow rows to q4 rows={converted}", flush=True)
+    if labeled_q2 or converted_q4:
+        print(
+            "[krx-fs-fundamentals-sync] normalized current-period flow rows "
+            f"q2={labeled_q2} q4={converted_q4}",
+            flush=True,
+        )
     return out
 
 
@@ -436,7 +537,7 @@ def _list_source_files(db_path: Path, raw_table: str, symbol: str | None, limit_
     if limit_reports is not None and int(limit_reports) > 0:
         limit_sql = " LIMIT ?"
         params.append(int(limit_reports))
-    with sqlite3.connect(db_path) as conn:
+    with sqlite3.connect(db_path, timeout=60.0) as conn:
         exists = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
             (raw_table,),
@@ -466,7 +567,7 @@ def _load_raw_rows_for_source_files(db_path: Path, raw_table: str, source_files:
         f"WHERE source_file IN ({placeholders}) "
         "ORDER BY symbol, source_file, source_row_number"
     )
-    with sqlite3.connect(db_path) as conn:
+    with sqlite3.connect(db_path, timeout=60.0) as conn:
         return pd.read_sql_query(query, conn, params=source_files)
 
 

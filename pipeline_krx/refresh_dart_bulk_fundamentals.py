@@ -25,6 +25,7 @@ from .refresh_dart_fundamentals import (
     _extract_date_text,
     _normalize_number,
     _normalize_symbol,
+    _normalize_quarterly_flow_values,
     _report_code_to_period_type,
 )
 
@@ -436,6 +437,7 @@ def refresh_krx_dart_bulk_fundamentals(
             "download one or more financial bulk ZIP files in a browser and place them under data/dart_bulk, then rerun."
         )
     combined = pd.concat(all_frames, axis=0, ignore_index=True)
+    combined = _normalize_quarterly_flow_values(combined)
     combined = combined.drop_duplicates(subset=["symbol", "fiscal_date", "period_type"], keep="last")
     stored = upsert_krx_quarterly_fundamentals(combined, db_path=sqlite_result.db_path)
     return KRXDartBulkRefreshResult(

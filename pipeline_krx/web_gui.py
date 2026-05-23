@@ -1002,6 +1002,7 @@ def _html_benchmark_page(
             <option value="pykrx_index" {"selected" if form.get("benchmark_source_mode", "pykrx_index") == "pykrx_index" else ""}>pykrx 코스피200 자동동기화</option>
             <option value="top200_proxy" {"selected" if form.get("benchmark_source_mode", "") == "top200_proxy" else ""}>시총 상위 200 proxy</option>
             <option value="manual_csv" {"selected" if form.get("benchmark_source_mode", "") == "manual_csv" else ""}>수동 CSV</option>
+            <option value="namuwiki" {"selected" if form.get("benchmark_source_mode", "") == "namuwiki" else ""}>namu.wiki 표 매핑</option>
           </select>
         </div>
         <div class="field">

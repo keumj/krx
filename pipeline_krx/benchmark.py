@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import html
+import re
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.error import URLError
+from urllib.request import Request, urlopen
 
 import pandas as pd
 
@@ -28,6 +32,7 @@ DEFAULT_BENCHMARK_CODE = "KOSPI200"
 DEFAULT_BENCHMARK_NAME = "KOSPI 200"
 DEFAULT_INDEX_TICKER = "KOSPI200"
 KOSPI200_INDEX_CODE = "1028"
+NAMUWIKI_KOSPI200_URL = "https://namu.wiki/w/KOSPI200"
 
 
 @dataclass(frozen=True)
@@ -70,6 +75,24 @@ def _normalize_date_text(value: object) -> str | None:
     try:
         return pd.Timestamp(text).normalize().strftime("%Y-%m-%d")
     except Exception:
+        return None
+
+
+def _normalize_company_name(value: object) -> str:
+    text = html.unescape(str(value or "")).strip()
+    text = re.sub(r"\s+", "", text)
+    text = re.sub(r"\(.*?\)", "", text)
+    text = text.replace("&amp;", "&")
+    return text
+
+
+def _parse_number(value: object) -> float | None:
+    text = str(value or "").strip().replace(",", "")
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
         return None
 
 
@@ -142,9 +165,9 @@ def _load_manual_constituents(path: Path) -> pd.DataFrame:
         raise RuntimeError(f"KOSPI200 manual CSV is empty: {path}")
 
     cols = {str(col).strip().lower(): col for col in frame.columns}
-    symbol_col = cols.get("symbol")
+    symbol_col = cols.get("symbol") or cols.get("종목코드") or cols.get("code") or cols.get("ticker")
     if symbol_col is None:
-        raise RuntimeError(f"KOSPI200 manual CSV must include Symbol column: {path}")
+        raise RuntimeError(f"KOSPI200 manual CSV must include Symbol or 종목코드 column: {path}")
 
     normalized = pd.DataFrame()
     normalized["symbol"] = frame[symbol_col].map(_normalize_symbol)
@@ -154,6 +177,13 @@ def _load_manual_constituents(path: Path) -> pd.DataFrame:
 
     order_col = cols.get("memberorder") or cols.get("member_order")
     notes_col = cols.get("notes")
+    name_col = cols.get("종목명") or cols.get("name") or cols.get("namekr") or cols.get("name_kr")
+    market_cap_col = (
+        cols.get("market_cap")
+        or cols.get("marketcap")
+        or cols.get("상장시가총액(원)")
+        or cols.get("시가총액")
+    )
     fallback_order = pd.Series(range(1, len(normalized.index) + 1), index=normalized.index, dtype="float64")
     normalized["member_order"] = (
         pd.to_numeric(frame.loc[normalized.index, order_col], errors="coerce")
@@ -166,8 +196,189 @@ def _load_manual_constituents(path: Path) -> pd.DataFrame:
         if notes_col is not None
         else ""
     )
+    if name_col is not None:
+        names = frame.loc[normalized.index, name_col].astype(str).str.strip().replace({"nan": "", "None": ""})
+        normalized["notes"] = [
+            note if note else f"csv_name={name}"
+            for note, name in zip(normalized["notes"].tolist(), names.tolist())
+        ]
+    if market_cap_col is not None:
+        normalized["market_cap"] = frame.loc[normalized.index, market_cap_col].map(_parse_number)
     normalized["source"] = "manual_csv"
     return normalized.sort_values(["member_order", "symbol"]).reset_index(drop=True)
+
+
+def _fetch_text(url: str) -> str:
+    request = Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) KRXBenchmarkSync/1.0",
+            "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.7,en;q=0.6",
+        },
+    )
+    try:
+        with urlopen(request, timeout=30) as response:
+            charset = response.headers.get_content_charset() or "utf-8"
+            return response.read().decode(charset, errors="replace")
+    except URLError as exc:
+        raise RuntimeError(f"failed to fetch {url}: {exc}") from exc
+
+
+def _parse_namuwiki_basis_date(page_html: str) -> str | None:
+    match = re.search(r"(\d{4})년\s*(\d{1,2})월\s*(\d{1,2})일\s*기준", page_html)
+    if not match:
+        return None
+    year, month, day = (int(value) for value in match.groups())
+    return f"{year:04d}-{month:02d}-{day:02d}"
+
+
+def _strip_tags(value: str) -> str:
+    text = re.sub(r"<br[^>]*>", " ", value, flags=re.IGNORECASE)
+    text = re.sub(r"<[^>]+>", "", text)
+    return html.unescape(text).strip()
+
+
+def _parse_namuwiki_constituents(page_html: str) -> tuple[pd.DataFrame, str | None]:
+    section_match = re.search(r"<span id='구성 종목'[^>]*>", page_html)
+    if not section_match:
+        raise RuntimeError("namuwiki KOSPI200 section was not found")
+    section = page_html[section_match.start() :]
+    next_section = re.search(r"<h2\b", section[1:], flags=re.IGNORECASE)
+    if next_section:
+        section = section[: next_section.start() + 1]
+
+    table_match = re.search(r"<table\b.*?</table>", section, flags=re.IGNORECASE | re.DOTALL)
+    if not table_match:
+        raise RuntimeError("namuwiki KOSPI200 constituent table was not found")
+    table_html = table_match.group(0)
+    basis_date = _parse_namuwiki_basis_date(table_html)
+
+    rows: list[dict[str, object]] = []
+    seen_orders: set[int] = set()
+    cell_pattern = re.compile(r"<td\b[^>]*>(.*?)</td>", flags=re.IGNORECASE | re.DOTALL)
+    order_pattern = re.compile(r"<strong[^>]*>\s*(\d{1,3})\s*</strong>", flags=re.IGNORECASE)
+    link_pattern = re.compile(
+        r"<a\b[^>]*title='([^']+)'[^>]*>(.*?)</a>",
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    for cell_match in cell_pattern.finditer(table_html):
+        cell_html = cell_match.group(1)
+        order_match = order_pattern.search(cell_html)
+        link_match = link_pattern.search(cell_html)
+        if not order_match:
+            continue
+        member_order = int(order_match.group(1))
+        if member_order in seen_orders:
+            continue
+        seen_orders.add(member_order)
+        if link_match:
+            title_name = _strip_tags(link_match.group(1))
+            display_name = _strip_tags(link_match.group(2))
+        else:
+            strong_matches = re.findall(
+                r"<strong[^>]*>(.*?)</strong>",
+                cell_html,
+                flags=re.IGNORECASE | re.DOTALL,
+            )
+            name_values = [_strip_tags(value) for value in strong_matches]
+            name_values = [value for value in name_values if value and not value.isdigit()]
+            if not name_values:
+                continue
+            title_name = name_values[-1]
+            display_name = name_values[-1]
+        rows.append(
+            {
+                "member_order": member_order,
+                "title_name": title_name,
+                "display_name": display_name,
+            }
+        )
+
+    frame = pd.DataFrame(rows)
+    if frame.empty:
+        raise RuntimeError("namuwiki KOSPI200 constituent parser returned no rows")
+    return frame.sort_values("member_order").reset_index(drop=True), basis_date
+
+
+def _load_name_symbol_map(conn: sqlite3.Connection) -> dict[str, str]:
+    securities = pd.read_sql_query(
+        """
+        SELECT symbol, name_kr, name_en
+        FROM securities
+        WHERE is_active = 1
+        """,
+        conn,
+    )
+    mapping: dict[str, str] = {}
+    for record in securities.to_dict(orient="records"):
+        symbol = _normalize_symbol(record.get("symbol"))
+        if not symbol:
+            continue
+        for field in ("name_kr", "name_en"):
+            key = _normalize_company_name(record.get(field))
+            if key and key not in mapping:
+                mapping[key] = symbol
+    aliases = {
+        "현대차": "현대자동차",
+        "삼성화재": "삼성화재해상보험",
+        "한국전력": "한국전력공사",
+        "KT": "케이티",
+        "KT&G": "케이티앤지",
+        "LS일렉트릭": "엘에스일렉트릭",
+        "LSELECTRIC": "엘에스일렉트릭",
+        "LIG넥스원": "LIG디펜스앤에어로스페이스",
+        "SK바이오팜": "에스케이바이오팜",
+        "엔씨소프트": "NC",
+        "KCC": "케이씨씨",
+        "TKG휴켐스": "티케이지휴켐스",
+        "포스코퓨처엠": "POSCO퓨처엠",
+    }
+    for alias, canonical in aliases.items():
+        alias_key = _normalize_company_name(alias)
+        canonical_key = _normalize_company_name(canonical)
+        if alias_key and canonical_key in mapping:
+            mapping[alias_key] = mapping[canonical_key]
+    return mapping
+
+
+def _load_namuwiki_constituents(conn: sqlite3.Connection) -> pd.DataFrame:
+    page_html = _fetch_text(NAMUWIKI_KOSPI200_URL)
+    parsed, basis_date = _parse_namuwiki_constituents(page_html)
+    name_to_symbol = _load_name_symbol_map(conn)
+
+    rows: list[dict[str, object]] = []
+    missing: list[str] = []
+    for record in parsed.to_dict(orient="records"):
+        candidates = [
+            _normalize_company_name(record.get("title_name")),
+            _normalize_company_name(record.get("display_name")),
+        ]
+        symbol = next((name_to_symbol[name] for name in candidates if name in name_to_symbol), "")
+        display_name = str(record.get("display_name") or record.get("title_name") or "").strip()
+        if not symbol:
+            missing.append(display_name)
+            continue
+        note_parts = [f"namuwiki_name={display_name}"]
+        if basis_date:
+            note_parts.append(f"namuwiki_basis_date={basis_date}")
+        rows.append(
+            {
+                "symbol": symbol,
+                "member_order": int(record.get("member_order") or len(rows) + 1),
+                "source": "namuwiki",
+                "notes": "; ".join(note_parts),
+            }
+        )
+
+    frame = pd.DataFrame(rows).drop_duplicates(subset=["symbol"], keep="first")
+    if len(frame.index) < 190:
+        sample = ", ".join(missing[:12])
+        raise RuntimeError(
+            f"namuwiki KOSPI200 mapped only {len(frame.index)} rows; missing sample: {sample}"
+        )
+    if missing:
+        _log(f"namuwiki mapped rows={len(frame.index)} missing={len(missing)} sample={', '.join(missing[:8])}")
+    return frame.sort_values(["member_order", "symbol"]).reset_index(drop=True)
 
 
 def _load_pykrx_index_constituents(*, as_of_date: str) -> pd.DataFrame:
@@ -226,10 +437,14 @@ def sync_kospi200_constituent_history(
     start_date: str | None = None,
     end_date: str | None = None,
     source_mode: str = "pykrx_index",
+    source_csv: Path = DEFAULT_SOURCE_CSV,
+    constituent_count: int = DEFAULT_CONSTITUENT_COUNT,
     skip_empty: bool = True,
 ) -> KRXIndexHistorySyncResult:
-    if source_mode != "pykrx_index":
-        raise ValueError("daily constituent history currently supports source_mode='pykrx_index' only")
+    if source_mode not in {"pykrx_index", "manual_csv", "top200_proxy", "namuwiki"}:
+        raise ValueError(
+            "daily constituent history supports source_mode='pykrx_index', 'manual_csv', 'top200_proxy', or 'namuwiki'"
+        )
 
     sqlite_result = init_krx_project_db(db_path=Path(db_path) if db_path is not None else None)
     with sqlite3.connect(sqlite_result.db_path) as conn:
@@ -249,7 +464,24 @@ def sync_kospi200_constituent_history(
     stored_days = 0
     for date_text in dates:
         try:
-            frame = _load_pykrx_index_constituents(as_of_date=date_text)
+            if source_mode == "pykrx_index":
+                frame = _load_pykrx_index_constituents(as_of_date=date_text)
+            elif source_mode == "manual_csv":
+                frame = _load_manual_constituents(source_csv)
+            elif source_mode == "namuwiki":
+                with sqlite3.connect(sqlite_result.db_path) as conn:
+                    frame = _load_namuwiki_constituents(conn)
+            else:
+                with sqlite3.connect(sqlite_result.db_path) as conn:
+                    frame = _load_top_kospi_proxy(
+                        conn,
+                        as_of_date=date_text,
+                        constituent_count=max(int(constituent_count), 1),
+                    )
+                if not frame.empty:
+                    frame = frame[["symbol", "member_order"]].copy()
+                    frame["source"] = "top200_proxy"
+                    frame["notes"] = "proxy_history_from_latest_market_cap"
         except Exception as exc:
             if skip_empty:
                 _log(f"Skipped {date_text}: {type(exc).__name__}: {exc}")
@@ -260,6 +492,16 @@ def sync_kospi200_constituent_history(
                 _log(f"Skipped {date_text}: empty constituent list")
                 continue
             raise RuntimeError(f"empty constituent list for {date_text}")
+        with sqlite3.connect(sqlite_result.db_path) as conn:
+            conn.execute(
+                """
+                DELETE FROM index_constituent_history
+                WHERE index_code = ?
+                  AND as_of_date = ?
+                """,
+                (DEFAULT_BENCHMARK_CODE, date_text),
+            )
+            conn.commit()
         changed = upsert_index_constituent_history(
             frame,
             index_code=DEFAULT_BENCHMARK_CODE,
@@ -292,9 +534,13 @@ def _attach_latest_market_caps(
     if frame.empty:
         return frame.copy()
 
-    symbols = [_normalize_symbol(value) for value in frame["symbol"].tolist() if _normalize_symbol(value)]
+    base = frame.copy()
+    if "market_cap" in base.columns:
+        base = base.rename(columns={"market_cap": "source_market_cap"})
+
+    symbols = [_normalize_symbol(value) for value in base["symbol"].tolist() if _normalize_symbol(value)]
     if not symbols:
-        return frame.copy()
+        return base
 
     placeholders = ",".join("?" for _ in symbols)
     price_frame = pd.read_sql_query(
@@ -324,7 +570,12 @@ def _attach_latest_market_caps(
         conn,
         params=[*symbols, as_of_date],
     )
-    return frame.merge(price_frame, on="symbol", how="left")
+    merged = base.merge(price_frame, on="symbol", how="left")
+    if "source_market_cap" in merged.columns:
+        source_market_cap = pd.to_numeric(merged["source_market_cap"], errors="coerce")
+        db_market_cap = pd.to_numeric(merged.get("market_cap"), errors="coerce")
+        merged["market_cap"] = source_market_cap.combine_first(db_market_cap)
+    return merged
 
 
 def _apply_proxy_weights(frame: pd.DataFrame) -> pd.DataFrame:
@@ -377,6 +628,9 @@ def sync_kospi200_benchmark(
             benchmark_frame = _attach_latest_market_caps(conn, base, as_of_date=snapshot_date)
         elif source_mode == "manual_csv":
             base = _load_manual_constituents(source_csv)
+            benchmark_frame = _attach_latest_market_caps(conn, base, as_of_date=snapshot_date)
+        elif source_mode == "namuwiki":
+            base = _load_namuwiki_constituents(conn)
             benchmark_frame = _attach_latest_market_caps(conn, base, as_of_date=snapshot_date)
         elif source_mode == "top200_proxy":
             benchmark_frame = _load_top_kospi_proxy(
@@ -437,7 +691,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--source-mode",
         default=DEFAULT_SOURCE_MODE,
-        choices=["pykrx_index", "top200_proxy", "manual_csv"],
+        choices=["pykrx_index", "top200_proxy", "manual_csv", "namuwiki"],
         help="How to construct the benchmark constituents",
     )
     parser.add_argument("--source-csv", default=str(DEFAULT_SOURCE_CSV), help="Manual KOSPI200 CSV path")
@@ -459,6 +713,8 @@ def main() -> int:
             start_date=str(args.start_date).strip() or None,
             end_date=str(args.end_date).strip() or str(args.as_of_date).strip() or None,
             source_mode=str(args.source_mode).strip() or DEFAULT_SOURCE_MODE,
+            source_csv=Path(args.source_csv),
+            constituent_count=max(int(args.constituent_count), 1),
         )
         _log(
             f"Completed constituent history sync: code={result.index_code}, "

@@ -210,7 +210,7 @@ def krx_prices_sqlite_path(shared_db_root: Path | str | None = None) -> Path:
 
 
 def _connect(db_path: Path) -> sqlite3.Connection:
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=60.0)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA foreign_keys=OFF")
@@ -1042,6 +1042,18 @@ def upsert_krx_benchmark_snapshot(
     with _connect(target) as conn:
         _ensure_schema(conn)
         before = conn.total_changes
+        normalized_benchmark_code = _normalize_text(benchmark_code) or benchmark_code
+        row_symbols = [str(row[2]) for row in rows]
+        placeholders = ",".join("?" for _ in row_symbols)
+        conn.execute(
+            f"""
+            DELETE FROM benchmark_constituents
+            WHERE benchmark_code = ?
+              AND as_of_date = ?
+              AND symbol NOT IN ({placeholders})
+            """,
+            (normalized_benchmark_code, snapshot_date, *row_symbols),
+        )
         conn.execute(
             """
             INSERT INTO benchmark_definitions(
@@ -1057,7 +1069,7 @@ def upsert_krx_benchmark_snapshot(
                 updated_at=CURRENT_TIMESTAMP
             """,
             (
-                _normalize_text(benchmark_code) or benchmark_code,
+                normalized_benchmark_code,
                 _normalize_text(benchmark_name) or benchmark_name,
                 _normalize_text(index_ticker),
                 _normalize_text(weighting_method) or "market_cap_proxy",

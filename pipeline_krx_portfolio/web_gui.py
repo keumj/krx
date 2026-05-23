@@ -111,6 +111,21 @@ def _base_css() -> str:
     .nav a { text-decoration: none; color: #111; border: 1px solid #111; background: #fff; border-radius: 999px; padding: 7px 12px; font-size: 13px; }
     .nav a.active { background: #111; color: #fff; border-color: #111; }
     .card { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 14px; }
+    .card h3 { margin: 0 0 10px 0; font-size: 15px; line-height: 1.3; }
+    .section-title { margin: 18px 0 8px; font-size: 13px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 0.03em; }
+    .feature-card { border-left: 4px solid var(--accent); background: linear-gradient(180deg, #ffffff 0%, #f9fbfd 100%); }
+    .span-2 { grid-column: 1 / -1; }
+    .table-card .table-wrap { border: 1px solid var(--line); border-radius: 8px; overflow: auto; }
+    .table-card .data-table { border-collapse: separate; border-spacing: 0; }
+    .table-card .data-table th { background: #f4f7fb; color: #344054; font-weight: 700; position: sticky; top: 0; z-index: 1; }
+    .table-card .data-table th, .table-card .data-table td { border-width: 0 0 1px 0; padding: 8px 9px; }
+    .table-card .data-table tr:last-child td { border-bottom: 0; }
+    .table-card .data-table tbody tr:nth-child(even) { background: #fbfcfe; }
+    .compact-grid { display: grid; grid-template-columns: minmax(360px, 0.95fr) minmax(420px, 1.35fr); gap: 12px; align-items: start; }
+    .summary-card { border-left: 4px solid var(--accent); background: linear-gradient(180deg, #ffffff 0%, #f9fbfd 100%); }
+    .summary-split { display: grid; grid-template-columns: minmax(360px, 1fr) minmax(360px, 1fr); gap: 14px; align-items: start; }
+    .summary-pane { min-width: 0; }
+    .summary-pane h4 { margin: 0 0 8px 0; font-size: 13px; color: var(--muted); }
     .stack { display: grid; gap: 12px; }
     .grid-2 { display: grid; grid-template-columns: repeat(2, minmax(320px, 1fr)); gap: 12px; }
     .grid-3 { display: grid; grid-template-columns: repeat(3, minmax(220px, 1fr)); gap: 12px; }
@@ -254,6 +269,8 @@ def _base_css() -> str:
       .form-grid, .form-grid.form-virtual { grid-template-columns: repeat(2, minmax(140px, 1fr)); }
       .metrics { grid-template-columns: repeat(2, minmax(160px, 1fr)); }
       .grid-2, .grid-3 { grid-template-columns: 1fr; }
+      .compact-grid { grid-template-columns: 1fr; }
+      .summary-split { grid-template-columns: 1fr; }
       .refresh-card-head { grid-template-columns: 1fr; }
       .refresh-action-row { grid-template-columns: 1fr; }
       .refresh-action-row button { width: 100%; }
@@ -618,12 +635,27 @@ def _attribution_page(ctx: _PageContext) -> str:
     body = f"""
     {_message_block(ctx)}
     {_date_range_form("attribution", ctx)}
-    <div class="grid-2" style="margin-bottom: 12px;">
-      <div class="card">
-      <h3>누적 수익률 추이 (vs KOSPI200)</h3>
-      {f'<img src="data:image/png;base64,{dashboard.cumulative_chart}" class="chart-img" />' if dashboard and dashboard.cumulative_chart else "<p class='hint'>차트 데이터를 불러올 수 없습니다.</p>"}
+    <div class="section-title">Performance Summary</div>
+    <div class="card summary-card table-card" style="margin-bottom: 12px;">
+      <h3>성과 요약</h3>
+      <div class="summary-split">
+        <div class="summary-pane">
+          <h4>절대성과</h4>
+          {_safe_table(dashboard.portfolio_summary if dashboard else pd.DataFrame())}
+        </div>
+        <div class="summary-pane">
+          <h4>상대성과</h4>
+          {_safe_table(getattr(dashboard, "relative_decomposition", pd.DataFrame()) if dashboard else pd.DataFrame())}
+        </div>
       </div>
-      <div class="card">
+    </div>
+    <div class="section-title">Performance Shape</div>
+    <div class="grid-2" style="margin-bottom: 12px;">
+      <div class="card table-card">
+        <h3>누적 수익률 추이 (vs KOSPI200)</h3>
+        {f'<img src="data:image/png;base64,{dashboard.cumulative_chart}" class="chart-img" />' if dashboard and dashboard.cumulative_chart else "<p class='hint'>차트 데이터를 불러올 수 없습니다.</p>"}
+      </div>
+      <div class="card table-card">
         <h3>주간 수익률 26주 (vs KOSPI200)</h3>
         {f'<img src="data:image/png;base64,{dashboard.weekly_return_chart}" class="chart-img" />' if dashboard and dashboard.weekly_return_chart else "<p class='hint'>차트 데이터를 불러올 수 없습니다.</p>"}
       </div>
@@ -638,36 +670,34 @@ def _attribution_page(ctx: _PageContext) -> str:
          {f'<img src="data:image/png;base64,{dashboard.style_exposure_chart}" class="chart-img" />' if dashboard and dashboard.style_exposure_chart else "<p class='hint'>차트 데이터를 불러올 수 없습니다.</p>"}
        </div>
     </div>
-    <div class="card">
+    <div class="section-title">Portfolio Tables</div>
+    <div class="card table-card">
       <h3>보유 종목 절대 성과</h3>
       {_safe_table(dashboard.holdings_performance if dashboard else pd.DataFrame())}
     </div>
-    <div class="grid-2">
-      <div class="card">
-        <h3>포트폴리오 절대 성과 요약</h3>
-        {_safe_table(dashboard.portfolio_summary if dashboard else pd.DataFrame())}
-      </div>
-      <div class="card">
+    <div class="grid-2" style="margin-top: 12px;">
+      <div class="card table-card">
         <h3>스타일 노출</h3>
         {_safe_table(dashboard.style_exposure if dashboard else pd.DataFrame())}
       </div>
-    </div>
-    <div class="card">
-      <h3>KRX 대비 종목별 상대 기여</h3>
-      {_safe_table(dashboard.stock_attribution if dashboard else pd.DataFrame())}
-    </div>
-    <div class="grid-2">
-      <div class="card">
-        <h3>KRX 대비 섹터 Attribution</h3>
+      <div class="card table-card">
+        <h3>KOSPI200 대비 섹터 Attribution</h3>
         {_safe_table(dashboard.attribution if dashboard else pd.DataFrame())}
       </div>
-      <div class="card">
+    </div>
+    <div class="section-title">Security Detail</div>
+    <div class="card table-card">
+      <h3>Security Relative Contribution</h3>
+      {_safe_table(dashboard.stock_attribution if dashboard else pd.DataFrame())}
+    </div>
+    <div class="grid-2" style="margin-top: 12px;">
+      <div class="card table-card span-2">
         <h3>스타일 Attribution</h3>
         {_safe_table(dashboard.style_attribution if dashboard else pd.DataFrame())}
       </div>
     </div>
     """
-    return _layout("Portfolio Lab | 성과 Attribution", "보유 종목 절대 성과를 먼저 보고, 그 다음 KRX 대비 상대성과를 이어서 봅니다. WTD, MTD, YTD는 선택 기간과 별개로 항상 함께 계산됩니다.", "attribution", ctx, body)
+    return _layout("Portfolio Lab | 성과 Attribution", "보유 종목 절대 성과를 먼저 보고, 그 다음 KOSPI200 대비 상대성과를 이어서 봅니다. WTD, MTD, YTD는 선택 기간과 별개로 항상 함께 계산됩니다.", "attribution", ctx, body)
 
 
 def _risk_page(ctx: _PageContext) -> str:
@@ -675,15 +705,29 @@ def _risk_page(ctx: _PageContext) -> str:
     body = f"""
     {_message_block(ctx)}
     {_date_range_form("risk", ctx)}
-    <div class="grid-2">
-      <div class="card">
+    <div class="section-title">Risk Overview</div>
+    <div class="grid-2" style="margin-bottom: 12px;">
+      <div class="card feature-card table-card">
         <h3>절대 리스크</h3>
         {_safe_table(dashboard.risk_summary if dashboard else pd.DataFrame())}
       </div>
-      <div class="card">
-        <h3>KRX 대비 상대 리스크</h3>
+      <div class="card feature-card table-card">
+        <h3>KOSPI200 대비 상대 리스크</h3>
         {_safe_table(dashboard.relative_risk_summary if dashboard else pd.DataFrame())}
       </div>
+    </div>
+    <div class="grid-2" style="margin-bottom: 12px;">
+      <div class="card feature-card table-card">
+        <h3>Relative Risk Decomposition</h3>
+        {_safe_table(getattr(dashboard, "relative_risk_decomposition", pd.DataFrame()) if dashboard else pd.DataFrame())}
+      </div>
+      <div class="card feature-card table-card">
+        <h3>10D 99% VaR / Expected Shortfall</h3>
+        {_safe_table(getattr(dashboard, "var_summary", pd.DataFrame()) if dashboard else pd.DataFrame())}
+      </div>
+    </div>
+    <div class="section-title">Risk Contribution</div>
+    <div class="grid-2" style="margin-bottom: 12px;">
       <div class="card">
         <h3>종목별 절대 리스크 기여 (%)</h3>
         {f'<img src="data:image/png;base64,{dashboard.risk_contribution_chart}" class="chart-img" />' if dashboard and dashboard.risk_contribution_chart else "<p class='hint'>차트 데이터를 불러올 수 없습니다.</p>"}
@@ -694,17 +738,25 @@ def _risk_page(ctx: _PageContext) -> str:
         {f'<img src="data:image/png;base64,{dashboard.active_risk_contribution_chart}" class="chart-img" />' if dashboard and dashboard.active_risk_contribution_chart else "<p class='hint'>차트 데이터를 불러올 수 없습니다.</p>"}
         <div style="margin-top:10px;">{_safe_table(dashboard.active_risk_contribution if dashboard else pd.DataFrame(), max_rows=10)}</div>
       </div>
-      <div class="card">
+    </div>
+    <div class="section-title">Tail Risk Detail</div>
+    <div class="card table-card" style="margin-bottom: 12px;">
+        <h3>Incremental VaR by Position</h3>
+        {_safe_table(getattr(dashboard, "incremental_var", pd.DataFrame()) if dashboard else pd.DataFrame(), max_rows=20)}
+    </div>
+    <div class="section-title">Exposure And Factor Split</div>
+    <div class="grid-2">
+      <div class="card table-card">
         <h3>스타일 노출</h3>
         {_safe_table(dashboard.style_exposure if dashboard else pd.DataFrame())}
       </div>
-      <div class="card">
+      <div class="card table-card">
         <h3>팩터 분해</h3>
         {_safe_table(dashboard.factor_risk if dashboard else pd.DataFrame())}
       </div>
     </div>
     """
-    return _layout("Portfolio Lab | 리스크", "절대 리스크와 함께 KRX 대비 tracking error, active risk, 스타일 노출을 함께 봅니다.", "risk", ctx, body)
+    return _layout("Portfolio Lab | 리스크", "절대 리스크와 함께 KOSPI200 대비 tracking error, active risk, 스타일 노출을 함께 봅니다.", "risk", ctx, body)
 
 
 def _scoring_page(ctx: _PageContext) -> str:

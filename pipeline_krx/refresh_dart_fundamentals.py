@@ -538,28 +538,61 @@ def _normalize_quarterly_flow_values(frame: pd.DataFrame) -> pd.DataFrame:
         return frame
     out = frame.copy()
     out["_fiscal_year"] = out["fiscal_date"].astype(str).str.slice(0, 4)
-    converted = 0
+    converted_q4 = 0
+    labeled_q2 = 0
+
+    def cumulative_value(row: pd.Series, metric: str) -> float | None:
+        value = _normalize_number(row.get(f"_cumulative_{metric}"))
+        if value is not None:
+            return value
+        return None
+
     for (_symbol, _fiscal_year), group in out.groupby(["symbol", "_fiscal_year"], dropna=False):
+        q1 = group[group["period_type"] == "q1"]
+        half_year = group[group["period_type"] == "half_year"]
         q3 = group[group["period_type"] == "q3"]
         annual = group[group["period_type"] == "annual"]
-        if q3.empty or annual.empty:
+
+        q1_row = q1.iloc[-1] if not q1.empty else None
+        half_year_row = half_year.iloc[-1] if not half_year.empty else None
+        q3_row = q3.iloc[-1] if not q3.empty else None
+
+        for half_year_index in half_year.index:
+            out.at[half_year_index, "period_type"] = "q2"
+            out.at[half_year_index, "source"] = f"{out.at[half_year_index, 'source']}:q2_from_half_year_current_amount"
+            labeled_q2 += 1
+
+        if q3_row is None or annual.empty:
+            for annual_index in annual.index:
+                for metric in FLOW_METRICS:
+                    if metric in out.columns:
+                        out.at[annual_index, metric] = None
+                out.at[annual_index, "source"] = f"{out.at[annual_index, 'source']}:annual_flow_null_no_q3_cumulative"
             continue
-        q3_row = q3.iloc[-1]
+
         for annual_index in annual.index:
             changed_any = False
             for metric in FLOW_METRICS:
                 if metric not in out.columns:
                     continue
                 annual_value = _normalize_number(out.at[annual_index, metric])
-                q3_cumulative = _normalize_number(q3_row.get(f"_cumulative_{metric}"))
+                q3_cumulative = cumulative_value(q3_row, metric)
+                if q3_cumulative is None and q1_row is not None and half_year_row is not None:
+                    prior_values = [
+                        _normalize_number(q1_row.get(metric)),
+                        _normalize_number(half_year_row.get(metric)),
+                        _normalize_number(q3_row.get(metric)),
+                    ]
+                    if all(value is not None for value in prior_values):
+                        q3_cumulative = sum(value for value in prior_values if value is not None)
                 if annual_value is None or q3_cumulative is None:
                     continue
                 out.at[annual_index, metric] = annual_value - q3_cumulative
                 changed_any = True
             if changed_any:
                 out.at[annual_index, "period_type"] = "q4"
-                out.at[annual_index, "source"] = f"{out.at[annual_index, 'source']}:q4_from_annual_minus_q3_cumulative"
-                converted += 1
+                out.at[annual_index, "source"] = f"{out.at[annual_index, 'source']}:q4_from_annual_minus_prior_quarters"
+                converted_q4 += 1
             else:
                 for metric in FLOW_METRICS:
                     if metric in out.columns:
@@ -576,8 +609,8 @@ def _normalize_quarterly_flow_values(frame: pd.DataFrame) -> pd.DataFrame:
         out.loc[remaining_annual, "source"] = out.loc[remaining_annual, "source"].astype(str) + ":annual_flow_null"
     if helper_cols:
         out = out.drop(columns=helper_cols)
-    if converted:
-        _log(f"converted annual flow rows to q4 rows={converted}")
+    if labeled_q2 or converted_q4:
+        _log(f"normalized current-period flow rows q2={labeled_q2} q4={converted_q4}")
     return out
 
 
