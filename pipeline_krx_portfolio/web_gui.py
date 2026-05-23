@@ -726,6 +726,10 @@ def _risk_page(ctx: _PageContext) -> str:
         {_safe_table(getattr(dashboard, "var_summary", pd.DataFrame()) if dashboard else pd.DataFrame())}
       </div>
     </div>
+    <div class="card table-card" style="margin-bottom: 12px;">
+      <h3>Stock Selection Risk Decomposition</h3>
+      {_safe_table(getattr(dashboard, "stock_selection_risk", pd.DataFrame()) if dashboard else pd.DataFrame(), max_rows=20)}
+    </div>
     <div class="section-title">Risk Contribution</div>
     <div class="grid-2" style="margin-bottom: 12px;">
       <div class="card">

@@ -86,6 +86,7 @@ class PortfolioDashboard:
     risk_summary: pd.DataFrame
     relative_risk_summary: pd.DataFrame
     relative_risk_decomposition: pd.DataFrame
+    stock_selection_risk: pd.DataFrame
     var_summary: pd.DataFrame
     incremental_var: pd.DataFrame
     risk_contribution: pd.DataFrame
@@ -1948,7 +1949,7 @@ def _build_risk_summary(
                 "tracking_error_annual_pct": tracking_error,
                 "information_ratio": information_ratio,
                 "benchmark_vol_annual_pct": float(benchmark_daily.std(ddof=1) * np.sqrt(252) * 100.0) if len(benchmark_daily) > 1 else np.nan,
-                "correlation_to_krx": float(joined["p"].corr(joined["b"])) if len(joined) > 2 else np.nan,
+                "correlation_to_kospi200": float(joined["p"].corr(joined["b"])) if len(joined) > 2 else np.nan,
             }
         ]
     )
@@ -2188,6 +2189,99 @@ def _build_relative_risk_decomposition(
         },
     ]
     return pd.DataFrame(rows)
+
+
+def _build_stock_selection_risk_decomposition(
+    positions: pd.DataFrame,
+    benchmark_weights: pd.Series,
+    benchmark_close: pd.DataFrame,
+    sector_frame: pd.DataFrame,
+    *,
+    style_map: dict[str, str],
+) -> pd.DataFrame:
+    if positions.empty or benchmark_weights.empty or benchmark_close.empty:
+        return pd.DataFrame()
+    returns = benchmark_close.sort_index().pct_change(fill_method=None).dropna(how="all")
+    portfolio_weights = _normalize_weights(positions.set_index("ticker")["market_value"])
+    if "CASH" in portfolio_weights.index and "CASH" not in returns.columns:
+        returns["CASH"] = 0.0
+    symbols = [symbol for symbol in returns.columns if symbol in set(benchmark_weights.index).union(set(portfolio_weights.index))]
+    if not symbols:
+        return pd.DataFrame()
+
+    cov = returns[symbols].cov() * 252.0
+    cov_values = cov.to_numpy(dtype=float)
+    p = portfolio_weights.reindex(symbols).fillna(0.0)
+    b = benchmark_weights.reindex(symbols).fillna(0.0)
+    active = p - b
+    a = active.to_numpy(dtype=float)
+    te_var = float(a.T @ cov_values @ a)
+    if not np.isfinite(te_var) or te_var <= 0.0:
+        return pd.DataFrame()
+    te_vol = float(np.sqrt(te_var))
+    marginal = pd.Series(cov_values @ a / te_vol, index=symbols)
+
+    sector_lookup = dict(zip(sector_frame["Symbol"], sector_frame["Sector"]))
+    meta = pd.DataFrame(
+        {
+            "symbol": symbols,
+            "style_bucket": [style_map.get(symbol, "Unknown") if symbol != "CASH" else "Cash" for symbol in symbols],
+            "sector": [sector_lookup.get(symbol, "Unknown") if symbol != "CASH" else "Cash" for symbol in symbols],
+            "portfolio_weight": p.to_numpy(dtype=float),
+            "benchmark_weight": b.to_numpy(dtype=float),
+            "active_weight": active.to_numpy(dtype=float),
+        }
+    ).set_index("symbol")
+
+    style_component = pd.Series(0.0, index=symbols)
+    sector_component = pd.Series(0.0, index=symbols)
+    for _style, sub in meta.groupby("style_bucket", dropna=False):
+        style_active = float(sub["active_weight"].sum())
+        style_benchmark = float(sub["benchmark_weight"].sum())
+        if abs(style_active) > 0.0:
+            if style_benchmark > 0.0:
+                style_component.loc[sub.index] = style_active * sub["benchmark_weight"] / style_benchmark
+            else:
+                style_component.loc[sub.index] = style_active / max(len(sub.index), 1)
+        for _sector, cell in sub.groupby("sector", dropna=False):
+            cell_active = float(cell["active_weight"].sum())
+            cell_style_component = float(style_component.loc[cell.index].sum())
+            residual_cell_active = cell_active - cell_style_component
+            cell_benchmark = float(cell["benchmark_weight"].sum())
+            if abs(residual_cell_active) <= 0.0:
+                continue
+            if cell_benchmark > 0.0:
+                sector_component.loc[cell.index] = residual_cell_active * cell["benchmark_weight"] / cell_benchmark
+            else:
+                sector_component.loc[cell.index] = residual_cell_active / max(len(cell.index), 1)
+
+    stock_component = active - style_component - sector_component
+    te_component = stock_component * marginal * 100.0
+    stock_te_total = float(te_component.sum())
+    frame = pd.DataFrame(
+        {
+            "ticker": symbols,
+            "sector": meta["sector"].reindex(symbols).to_numpy(),
+            "style_bucket": meta["style_bucket"].reindex(symbols).to_numpy(),
+            "portfolio_weight_pct": p.to_numpy(dtype=float) * 100.0,
+            "benchmark_weight_pct": b.to_numpy(dtype=float) * 100.0,
+            "active_weight_pct": active.to_numpy(dtype=float) * 100.0,
+            "stock_selection_active_weight_pct": stock_component.to_numpy(dtype=float) * 100.0,
+            "marginal_tracking_error_pct": marginal.to_numpy(dtype=float) * 100.0,
+            "stock_selection_te_component_pct": te_component.to_numpy(dtype=float),
+            "share_of_total_tracking_error_pct": np.where(te_vol > 0, te_component.to_numpy(dtype=float) / (te_vol * 100.0) * 100.0, np.nan),
+            "share_of_stock_selection_risk_pct": np.where(abs(stock_te_total) > 1e-12, te_component.to_numpy(dtype=float) / stock_te_total * 100.0, np.nan),
+        }
+    )
+    frame = frame[frame["stock_selection_active_weight_pct"].abs() > 1e-8]
+    if frame.empty:
+        return frame
+    frame["risk_direction"] = np.where(
+        frame["stock_selection_te_component_pct"] >= 0,
+        "Increases tracking error",
+        "Offsets tracking error",
+    )
+    return frame.sort_values("stock_selection_te_component_pct", ascending=False).reset_index(drop=True)
 
 
 def _fit_factor_split(asset: pd.Series, market: pd.Series, sector: pd.Series) -> tuple[float, float, float]:
@@ -2875,6 +2969,7 @@ def build_portfolio_dashboard(
             risk_summary=pd.DataFrame(),
             relative_risk_summary=pd.DataFrame(),
             relative_risk_decomposition=pd.DataFrame(),
+            stock_selection_risk=pd.DataFrame(),
             var_summary=pd.DataFrame(),
             incremental_var=pd.DataFrame(),
             risk_contribution=pd.DataFrame(),
@@ -2972,6 +3067,13 @@ def build_portfolio_dashboard(
         style_map=style_map,
     )
     relative_risk_decomposition = _build_relative_risk_decomposition(
+        positions,
+        benchmark_weights,
+        benchmark_close,
+        benchmark_sector_frame,
+        style_map=style_map,
+    )
+    stock_selection_risk = _build_stock_selection_risk_decomposition(
         positions,
         benchmark_weights,
         benchmark_close,
@@ -3078,6 +3180,7 @@ def build_portfolio_dashboard(
         risk_summary=risk_summary,
         relative_risk_summary=relative_risk_summary,
         relative_risk_decomposition=relative_risk_decomposition,
+        stock_selection_risk=stock_selection_risk,
         var_summary=var_summary,
         incremental_var=incremental_var,
         risk_contribution=risk_contribution,
