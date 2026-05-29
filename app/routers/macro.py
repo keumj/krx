@@ -12,6 +12,6 @@ router = APIRouter(prefix="/macro")
 def macro_page(
     page: str,
     start_date: str | None = None,
-    lookback_days: int = 504,
+    lookback_days: int = macro_service.DEFAULT_MACRO_LOOKBACK_DAYS,
 ) -> HTMLResponse:
     return HTMLResponse(macro_service.render(page, start_date=start_date, lookback_days=lookback_days))

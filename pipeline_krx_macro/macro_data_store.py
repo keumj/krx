@@ -30,7 +30,7 @@ class MacroSeriesSpec:
     ecos_item_code4: str | None = None
 
 
-TREASURY_SERIES_IDS = ["DGS2", "DGS10", "DGS30"]
+TREASURY_SERIES_IDS = ["DGS1MO", "DGS3MO", "DGS6MO", "DGS1", "DGS2", "DGS3", "DGS5", "DGS7", "DGS10", "DGS20", "DGS30"]
 
 FRED_SPECS: list[MacroSeriesSpec] = [
     *[MacroSeriesSpec(series_id=sid, dataset="treasury", frequency="daily", fred_id=sid, local_csv="data/treasury_yields.csv") for sid in TREASURY_SERIES_IDS],
@@ -185,14 +185,53 @@ KOREA_MACRO_SPECS: list[MacroSeriesSpec] = [
     ),
 ]
 
+ECOS_100_TIMESERIES_SPECS: list[MacroSeriesSpec] = [
+    MacroSeriesSpec("KR_JPYKRW", "korea_fx", "daily", ecos_stat_code="731Y001", ecos_cycle="D", ecos_item_code1="0000002"),
+    MacroSeriesSpec("KR_EURKRW", "korea_fx", "daily", ecos_stat_code="731Y001", ecos_cycle="D", ecos_item_code1="0000003"),
+    MacroSeriesSpec("KR_CNYKRW", "korea_fx", "daily", ecos_stat_code="731Y001", ecos_cycle="D", ecos_item_code1="0000053"),
+    MacroSeriesSpec("KR_CALL_RATE", "korea_rates", "daily", ecos_stat_code="817Y002", ecos_cycle="D", ecos_item_code1="010101000"),
+    MacroSeriesSpec("KR_KORIBOR_3M", "korea_rates", "daily", ecos_stat_code="817Y002", ecos_cycle="D", ecos_item_code1="010150000"),
+    MacroSeriesSpec("KR_CD_91D", "korea_rates", "daily", ecos_stat_code="817Y002", ecos_cycle="D", ecos_item_code1="010502000"),
+    MacroSeriesSpec("KR_MONSTAB_1Y", "korea_rates", "daily", ecos_stat_code="817Y002", ecos_cycle="D", ecos_item_code1="010400001"),
+    MacroSeriesSpec("KR_CORP_AA_3Y", "korea_rates", "daily", ecos_stat_code="817Y002", ecos_cycle="D", ecos_item_code1="010300000"),
+    MacroSeriesSpec("KR_DEPOSIT_RATE", "korea_credit", "monthly", ecos_stat_code="121Y002", ecos_cycle="M", ecos_item_code1="BEABAA2"),
+    MacroSeriesSpec("KR_LOAN_RATE", "korea_credit", "monthly", ecos_stat_code="121Y006", ecos_cycle="M", ecos_item_code1="BECBLA01"),
+    MacroSeriesSpec("KR_EMP_RATE", "korea_labor", "monthly", ecos_stat_code="901Y027", ecos_cycle="M", ecos_item_code1="I61E"),
+    MacroSeriesSpec("KR_ECON_ACTIVE_POP", "korea_labor", "monthly", ecos_stat_code="901Y027", ecos_cycle="M", ecos_item_code1="I61B"),
+    MacroSeriesSpec("KR_EMPLOYED_PERSONS", "korea_labor", "monthly", ecos_stat_code="901Y027", ecos_cycle="M", ecos_item_code1="I61BA"),
+    MacroSeriesSpec("KR_ALL_INDUSTRY_PROD", "korea_activity", "monthly", ecos_stat_code="901Y033", ecos_cycle="M", ecos_item_code1="A00", ecos_item_code2="1"),
+    MacroSeriesSpec("KR_SERVICE_PROD", "korea_activity", "monthly", ecos_stat_code="901Y033", ecos_cycle="M", ecos_item_code1="AC00", ecos_item_code2="1"),
+    MacroSeriesSpec("KR_AUTO_RETAIL", "korea_activity", "monthly", ecos_stat_code="901Y038", ecos_cycle="M", ecos_item_code1="I51ABAA"),
+    MacroSeriesSpec("KR_FACILITY_INVEST", "korea_activity", "monthly", ecos_stat_code="901Y066", ecos_cycle="M", ecos_item_code1="I15A"),
+    MacroSeriesSpec("KR_CONSTRUCTION_COMPLETED", "korea_real_estate", "monthly", ecos_stat_code="901Y104", ecos_cycle="M", ecos_item_code1="I48A", ecos_item_code2="I37A"),
+    MacroSeriesSpec("KR_CONSTRUCTION_ORDERS", "korea_real_estate", "monthly", ecos_stat_code="901Y020", ecos_cycle="M", ecos_item_code1="I42A"),
+    MacroSeriesSpec("KR_CONSTRUCTION_STARTS", "korea_real_estate", "monthly", ecos_stat_code="901Y105", ecos_cycle="M", ecos_item_code1="ALL"),
+    MacroSeriesSpec("KR_CURRENT_ACCOUNT", "korea_external", "monthly", ecos_stat_code="301Y013", ecos_cycle="M", ecos_item_code1="000000"),
+    MacroSeriesSpec("KR_DIRECT_INVEST_ASSET", "korea_external", "monthly", ecos_stat_code="301Y013", ecos_cycle="M", ecos_item_code1="BOPF11000000"),
+    MacroSeriesSpec("KR_DIRECT_INVEST_LIAB", "korea_external", "monthly", ecos_stat_code="301Y013", ecos_cycle="M", ecos_item_code1="BOPF12000000"),
+    MacroSeriesSpec("KR_PORTFOLIO_INVEST_ASSET", "korea_external", "monthly", ecos_stat_code="301Y013", ecos_cycle="M", ecos_item_code1="BOPF21000000"),
+    MacroSeriesSpec("KR_PORTFOLIO_INVEST_LIAB", "korea_external", "monthly", ecos_stat_code="301Y013", ecos_cycle="M", ecos_item_code1="BOPF22000000"),
+    MacroSeriesSpec("KR_EXPORT_VALUE", "korea_trade", "monthly", ecos_stat_code="901Y118", ecos_cycle="M", ecos_item_code1="T002"),
+    MacroSeriesSpec("KR_IMPORT_VALUE", "korea_trade", "monthly", ecos_stat_code="901Y118", ecos_cycle="M", ecos_item_code1="T004"),
+    MacroSeriesSpec("KR_NET_TERMS_TRADE", "korea_trade", "monthly", ecos_stat_code="403Y005", ecos_cycle="M", ecos_item_code1="A"),
+    MacroSeriesSpec("KR_INCOME_TERMS_TRADE", "korea_trade", "monthly", ecos_stat_code="403Y005", ecos_cycle="M", ecos_item_code1="B"),
+    MacroSeriesSpec("KR_FX_RESERVES", "korea_external", "monthly", ecos_stat_code="732Y001", ecos_cycle="M", ecos_item_code1="99"),
+    MacroSeriesSpec("KR_EXTERNAL_DEBT", "korea_external", "quarterly", ecos_stat_code="311Y004", ecos_cycle="Q", ecos_item_code1="A000000"),
+    MacroSeriesSpec("KR_EXTERNAL_CLAIMS", "korea_external", "quarterly", ecos_stat_code="311Y005", ecos_cycle="Q", ecos_item_code1="B000000"),
+    MacroSeriesSpec("KR_PPI", "korea_prices", "monthly", ecos_stat_code="404Y014", ecos_cycle="M", ecos_item_code1="*AA"),
+    MacroSeriesSpec("KR_HOUSE_PRICE", "korea_real_estate", "monthly", ecos_stat_code="901Y113", ecos_cycle="M", ecos_item_code1="H69A"),
+    MacroSeriesSpec("KR_RENT_PRICE", "korea_real_estate", "monthly", ecos_stat_code="901Y114", ecos_cycle="M", ecos_item_code1="H69A"),
+    MacroSeriesSpec("KR_LAND_PRICE_CHANGE", "korea_real_estate", "monthly", ecos_stat_code="901Y064", ecos_cycle="M", ecos_item_code1="P65A"),
+]
+
 GLOBAL_COMPARISON_SPECS: list[MacroSeriesSpec] = [
     *[spec for spec in FRED_SPECS if spec.series_id in {"DGS2", "DGS10", "DGS30", "SP500"}],
     *LOCAL_ONLY_SPECS,
 ]
 
-DAILY_MACRO_SPECS = [*KOREA_MACRO_SPECS, *GLOBAL_COMPARISON_SPECS]
+DAILY_MACRO_SPECS = [*KOREA_MACRO_SPECS, *ECOS_100_TIMESERIES_SPECS, *GLOBAL_COMPARISON_SPECS]
 
-ALL_SPECS = [*KOREA_MACRO_SPECS, *FRED_SPECS, *LOCAL_ONLY_SPECS]
+ALL_SPECS = [*KOREA_MACRO_SPECS, *ECOS_100_TIMESERIES_SPECS, *FRED_SPECS, *LOCAL_ONLY_SPECS]
 
 
 def macro_db_path(path: str | os.PathLike[str] | None = None) -> Path:
@@ -251,6 +290,21 @@ def ensure_macro_schema(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS macro_key_statistics (
+            class_name TEXT NOT NULL,
+            statistic_name TEXT NOT NULL,
+            time TEXT NOT NULL,
+            value REAL,
+            unit TEXT,
+            source TEXT NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (class_name, statistic_name)
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_macro_key_statistics_class ON macro_key_statistics(class_name)")
 
 
 def normalize_series(series: pd.Series, *, series_id: str, start_date: str | pd.Timestamp | None = None) -> pd.Series:
@@ -344,3 +398,25 @@ def read_macro_frame(series_ids: list[str], *, start_date: str | pd.Timestamp, d
     frame.index = pd.to_datetime(frame.index).normalize()
     frame = frame.reindex(columns=series_ids)
     return frame if not frame.empty else None, f"macro_sqlite:{path.as_posix()}"
+
+
+def read_key_statistics(db_path: str | os.PathLike[str] | None = None) -> pd.DataFrame:
+    path = macro_db_path(db_path)
+    if not path.is_file():
+        return pd.DataFrame()
+    with connect_macro_readonly(path) as conn:
+        try:
+            raw = pd.read_sql_query(
+                """
+                SELECT class_name, statistic_name, time, value, unit, source, updated_at
+                FROM macro_key_statistics
+                ORDER BY class_name, statistic_name
+                """,
+                conn,
+            )
+        except Exception:
+            return pd.DataFrame()
+    if raw.empty:
+        return raw
+    raw["value"] = pd.to_numeric(raw["value"], errors="coerce")
+    return raw

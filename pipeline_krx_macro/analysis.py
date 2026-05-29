@@ -15,7 +15,7 @@ from pipeline_common.notebook_data import (
 )
 from pipeline_krx.db import load_latest_krx_benchmark_snapshot
 
-from .macro_data_store import read_macro_frame, read_macro_series
+from .macro_data_store import ECOS_100_TIMESERIES_SPECS, KOREA_MACRO_SPECS, read_key_statistics, read_macro_frame, read_macro_series
 
 try:
     from fredapi import Fred
@@ -46,6 +46,14 @@ class MacroDashboard:
     risk_stress: pd.DataFrame
     dollar_commodities: pd.DataFrame
     dollar_sensitivity: pd.DataFrame
+    key_stats_overview: pd.DataFrame
+    key_stats_rates: pd.DataFrame
+    key_stats_credit_liquidity: pd.DataFrame
+    key_stats_real_economy: pd.DataFrame
+    key_stats_external: pd.DataFrame
+    key_stats_household_labor: pd.DataFrame
+    key_stats_real_estate: pd.DataFrame
+    key_stats_corporate: pd.DataFrame
     sector_playbook: pd.DataFrame
     sector_attribution: pd.DataFrame
     sources: pd.DataFrame
@@ -55,6 +63,8 @@ class MacroDashboard:
     risk_series: pd.DataFrame
     stress_series: pd.DataFrame
     commodity_series: pd.DataFrame
+    core_macro_series: pd.DataFrame
+    ecos100_series: pd.DataFrame
 
 
 def _latest_value(series: pd.Series) -> float:
@@ -1129,6 +1139,106 @@ def _dollar_sensitivity_table(dxy: pd.Series, commodity_series: pd.DataFrame, sp
     return pd.DataFrame(rows)
 
 
+def _key_stat_signal(class_name: str, name: str, value: float) -> tuple[str, str]:
+    text = f"{class_name} {name}"
+    if not np.isfinite(value):
+        return "판단 보류", "최신값은 확인되지만 수치 판정에 필요한 값이 비어 있어 방향성 해석을 보류합니다."
+    if any(token in text for token in ["회사채", "대출금리", "KORIBOR", "CD수익률", "콜금리", "통안증권"]):
+        if value >= 4.5:
+            return "불리", "시장금리와 조달금리가 높은 구간입니다. 할인율, 이자비용, 신용 스프레드 부담이 커져 고PER 성장주와 레버리지 업종에는 불리합니다."
+        if value <= 3.0:
+            return "유리", "자금 조달 부담이 낮아지는 구간입니다. 금리 민감 성장주와 내수·부채 부담 업종에는 숨통이 트일 수 있습니다."
+        return "중립", "금리 레벨은 중간권입니다. 방향성이 더 중요해지는 구간이라 기준금리와 장단기 스프레드 변화를 함께 봅니다."
+    if "기준금리" in text:
+        if value >= 3.25:
+            return "불리", "정책금리 레벨이 높은 편입니다. 밸류에이션 확장보다 이익 안정성과 현금흐름을 우선하는 해석이 필요합니다."
+        if value <= 2.5:
+            return "유리", "정책금리 부담이 완화된 쪽입니다. 경기 둔화가 심하지 않다면 주식 멀티플에는 우호적으로 작용할 수 있습니다."
+        return "중립", "정책금리는 중립권입니다. 다음 방향이 인하인지 동결 장기화인지가 주식시장 판단의 핵심입니다."
+    if any(token in text for token in ["환율", "원/달러", "원/엔", "원/유로", "원/위안"]):
+        if "원/달러" in text and value >= 1450:
+            return "불리", "원/달러 환율이 높은 구간입니다. 외국인 수급, 수입 원가, 위험선호에는 부담이고 수출주는 환산 효과와 비용 부담을 나눠 봐야 합니다."
+        if "원/달러" in text and value <= 1350:
+            return "유리", "원화 약세 부담이 완화된 구간입니다. 외국인 수급과 국내 위험자산 심리에는 상대적으로 우호적입니다."
+        return "중립", "환율은 방향성과 변동성이 중요합니다. 급등이면 시장 부담, 안정이면 위험선호 회복의 보조 신호로 봅니다."
+    if any(token in text for token in ["소비자물가", "생활물가", "생산자물가", "수입물가", "수출물가"]):
+        return "불리" if value >= 120 else "중립", "물가지수 레벨이 높거나 재상승하면 마진과 소비 여력에 부담입니다. 둔화가 확인되면 금리 민감 업종과 내수주에는 우호적입니다."
+    if any(token in text for token in ["소비자심리지수", "기업심리지수", "경제심리지수"]):
+        if value >= 100:
+            return "유리", "심리지표가 기준선을 웃돌아 소비와 투자 기대가 개선된 쪽입니다. 내수·경기민감 업종에 우호적인 배경입니다."
+        if value < 90:
+            return "불리", "심리지표가 약해 수요 기대가 낮은 구간입니다. 주식 비중 확대보다 이익 안정성 확인이 우선입니다."
+        return "중립", "심리는 회복과 둔화 사이입니다. 방향성이 개선되는지 확인해야 합니다."
+    if any(token in text for token in ["선행지수", "동행지수", "생산지수", "가동률", "소매판매", "설비투자", "건설기성", "건설수주", "카드사용액"]):
+        if value >= 105:
+            return "유리", "실물 활동 지표가 기준 수준보다 강합니다. 경기민감주와 이익 추정에는 우호적인 신호입니다."
+        if value < 100:
+            return "불리", "실물 활동이 기준선 아래이거나 둔화된 쪽입니다. 매출 민감 업종은 보수적으로 점검합니다."
+        return "중립", "실물 활동은 기준선 부근입니다. 생산·소비·투자 지표가 같은 방향으로 움직이는지 확인합니다."
+    if any(token in text for token in ["경상수지", "외환보유액", "순상품교역조건", "소득교역조건"]):
+        if value > 0:
+            return "유리", "대외 건전성 또는 교역조건이 양호한 쪽입니다. 환율 안정과 외국인 수급에는 보조적으로 우호적입니다."
+        return "불리", "대외수지나 교역조건이 약한 쪽입니다. 환율과 수입 원가 부담을 함께 경계합니다."
+    if any(token in text for token in ["가계신용", "가계대출", "대외채무", "부채비율", "연체율"]):
+        return "불리", "레버리지와 상환 부담을 보여주는 지표입니다. 높거나 상승하면 금융·내수·부동산 민감 업종에 부담이 될 수 있습니다."
+    if any(token in text for token in ["M1", "M2", "Lf", "L("]):
+        return "유리", "통화량과 유동성 지표입니다. 증가세가 유지되면 위험자산에는 우호적일 수 있지만 과잉 유동성의 물가 압력도 함께 봅니다."
+    if any(token in text for token in ["실업률"]):
+        if value >= 4.0:
+            return "불리", "실업률이 높아 고용 둔화와 소비 약화를 경계해야 합니다."
+        return "유리", "실업률이 낮아 노동시장과 소비 기반은 안정적인 쪽입니다."
+    if any(token in text for token in ["고용률", "취업자", "경제활동인구"]):
+        return "유리", "고용 기반이 튼튼하면 내수와 서비스 업종의 하방을 완충합니다. 다만 임금 비용 압력도 함께 확인합니다."
+    if any(token in text for token in ["주택매매", "주택전세", "지가", "건축허가", "건축착공"]):
+        return "중립", "부동산 지표는 금융·건설·소비 심리에 중요합니다. 완만한 회복은 우호적이지만 급등은 금리와 가계부채 부담으로 되돌아올 수 있습니다."
+    return "중립", "주식시장에는 보조 지표입니다. 같은 분류의 지표들과 묶어 방향성을 확인하는 용도로 봅니다."
+
+
+def _prepare_key_statistics(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame is None or frame.empty:
+        return pd.DataFrame(columns=["분류", "지표", "시점", "현재", "단위", "시장 판단", "주식시장 해석"])
+    rows = []
+    for _, row in frame.iterrows():
+        class_name = str(row.get("class_name", "")).strip()
+        name = str(row.get("statistic_name", "")).strip()
+        value = pd.to_numeric(row.get("value"), errors="coerce")
+        signal, note = _key_stat_signal(class_name, name, float(value) if not pd.isna(value) else np.nan)
+        rows.append(
+            {
+                "분류": class_name,
+                "지표": name,
+                "시점": str(row.get("time", "")).strip(),
+                "현재": value,
+                "단위": str(row.get("unit", "") or "").strip(),
+                "시장 판단": signal,
+                "주식시장 해석": note,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _filter_key_statistics(frame: pd.DataFrame, classes: set[str] | None = None, names: list[str] | None = None) -> pd.DataFrame:
+    if frame.empty:
+        return frame
+    mask = pd.Series(True, index=frame.index)
+    if classes:
+        mask &= frame["분류"].isin(classes)
+    if names:
+        name_mask = pd.Series(False, index=frame.index)
+        for name in names:
+            name_mask |= frame["지표"].astype(str).str.contains(name, regex=False)
+        mask &= name_mask
+    return frame.loc[mask].reset_index(drop=True)
+
+
+def _combine_key_statistics(*frames: pd.DataFrame) -> pd.DataFrame:
+    parts = [frame for frame in frames if frame is not None and not frame.empty]
+    if not parts:
+        return pd.DataFrame(columns=["분류", "지표", "시점", "현재", "단위", "시장 판단", "주식시장 해석"])
+    out = pd.concat(parts, ignore_index=True)
+    return out.drop_duplicates(subset=["분류", "지표"], keep="first").reset_index(drop=True)
+
+
 def _sector_attribution_table(growth: float, inflation: float, policy: float, risk: float, liquidity: float) -> pd.DataFrame:
     specs = [
         ("반도체/IT", 0.30 * growth, 0.0, 0.15 * (100 - policy) + 0.25 * liquidity, 0.30 * risk, "환율 급등과 금리 재상승이 겹치면 외국인 수급과 고PER 멀티플이 같이 흔들릴 수 있습니다."),
@@ -1605,6 +1715,35 @@ def build_macro_dashboard(
         ]
     )
     dollar_sensitivity = _dollar_sensitivity_table(dxy, domestic_series.drop(columns=[fx_label], errors="ignore"), spx, fx_label=fx_label)
+    key_stats_all = _prepare_key_statistics(read_key_statistics())
+    key_stats_overview = _filter_key_statistics(
+        key_stats_all,
+        names=[
+            "한국은행 기준금리",
+            "원/달러",
+            "코스피",
+            "선행지수",
+            "동행지수",
+            "소비자심리지수",
+            "M2",
+            "실업률",
+            "소비자물가지수",
+            "경상수지",
+        ],
+    )
+    key_stats_rates = _filter_key_statistics(key_stats_all, classes={"시장금리", "여수신금리", "채권"})
+    key_stats_credit_liquidity = _filter_key_statistics(key_stats_all, classes={"예금/대출금", "통화량", "여수신금리"})
+    key_stats_real_economy = _filter_key_statistics(
+        key_stats_all,
+        classes={"성장률", "GDP대비 비율", "생산", "소비", "투자", "경기순환지표", "심리지표", "소비자/생산자 물가", "수출입 물가"},
+    )
+    key_stats_external = _filter_key_statistics(key_stats_all, classes={"환율", "국제수지", "통관수출입", "대외채권/채무"})
+    key_stats_household_labor = _filter_key_statistics(key_stats_all, classes={"가계", "소득분배지표", "고용", "노동", "인구"})
+    key_stats_real_estate = _combine_key_statistics(
+        _filter_key_statistics(key_stats_all, classes={"부동산 가격"}),
+        _filter_key_statistics(key_stats_all, names=["건설기성", "건축허가", "건설수주", "건축착공"]),
+    )
+    key_stats_corporate = _filter_key_statistics(key_stats_all, classes={"기업경영지표"})
     sector_bias = _sector_bias_table(growth_score, inflation_score, policy_score, risk_score, liquidity_score)
     sector_attribution = _sector_attribution_table(growth_score, inflation_score, policy_score, risk_score, liquidity_score)
     sources = pd.DataFrame(
@@ -1625,6 +1764,7 @@ def build_macro_dashboard(
             {"데이터": "M2", "출처": m2_source},
             {"데이터": "기준금리", "출처": fedfunds_source},
             {"데이터": "실질 GDP", "출처": gdp_source},
+            {"데이터": "ECOS 100대 통계지표", "출처": "macro_key_statistics" if not key_stats_all.empty else "not loaded"},
         ]
     )
     market_series = pd.concat([spx.rename(equity_label), dxy.rename(fx_label)], axis=1).dropna(how="all")
@@ -1632,6 +1772,27 @@ def build_macro_dashboard(
     rate_series = pd.concat([dgs2.rename("2Y"), dgs10.rename("10Y"), dgs30.rename("30Y"), curve_10y_3m, curve_10y_2y, curve_5y_2y, curve_30y_10y], axis=1).dropna(how="all")
     risk_series = pd.concat([spx.rename(equity_label), drawdown, rolling_vol], axis=1).dropna(how="all")
     stress_series = pd.concat([rolling_vol, drawdown, fx_vol, curve_10y_2y], axis=1).dropna(how="all")
+    core_macro_series = pd.concat(
+        [
+            cpi.rename("CPI"),
+            core_pce.rename("Core CPI"),
+            indpro.rename("Industrial Production"),
+            retail_sales.rename("Retail Sales"),
+            consumer_sentiment.rename("Consumer Sentiment"),
+            m2.rename("M2"),
+            fedfunds.rename("Base Rate"),
+            unrate.rename("Unemployment Rate"),
+            payrolls.rename("Employed Persons"),
+            real_gdp.rename("Real GDP"),
+        ],
+        axis=1,
+    ).sort_index().ffill().tail(tail_n).dropna(how="all")
+    ecos100_ids = [spec.series_id for spec in [*KOREA_MACRO_SPECS, *ECOS_100_TIMESERIES_SPECS]]
+    ecos100_series, _ = read_macro_frame(ecos100_ids, start_date=start)
+    if ecos100_series is None:
+        ecos100_series = pd.DataFrame()
+    else:
+        ecos100_series = ecos100_series.ffill().tail(tail_n).dropna(how="all")
 
     return MacroDashboard(
         as_of_date=as_of,
@@ -1651,6 +1812,14 @@ def build_macro_dashboard(
         risk_stress=risk_stress,
         dollar_commodities=dollar_commodities,
         dollar_sensitivity=dollar_sensitivity,
+        key_stats_overview=key_stats_overview,
+        key_stats_rates=key_stats_rates,
+        key_stats_credit_liquidity=key_stats_credit_liquidity,
+        key_stats_real_economy=key_stats_real_economy,
+        key_stats_external=key_stats_external,
+        key_stats_household_labor=key_stats_household_labor,
+        key_stats_real_estate=key_stats_real_estate,
+        key_stats_corporate=key_stats_corporate,
         sector_playbook=sector_bias,
         sector_attribution=sector_attribution,
         sources=sources,
@@ -1660,4 +1829,6 @@ def build_macro_dashboard(
         risk_series=risk_series,
         stress_series=stress_series,
         commodity_series=domestic_series,
+        core_macro_series=core_macro_series,
+        ecos100_series=ecos100_series,
     )

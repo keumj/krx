@@ -31,6 +31,12 @@ PAGES: dict[str, tuple[str, str]] = {
     "rates": ("금리/커브", "2년, 10년, 30년 금리와 장단기 스프레드를 점검합니다."),
     "risk": ("위험자산", "KOSPI200 수익률, 변동성, 낙폭을 기준으로 위험선호를 읽습니다."),
     "dollar": ("환율/국내지표", "원/달러 환율과 국내 비용·활동 지표를 함께 봅니다."),
+    "credit-liquidity": ("신용/유동성", "100대지표의 여수신, 예금·대출, 통화량을 묶어 국내 신용 여건을 봅니다."),
+    "real-economy": ("실물경기", "생산, 소비, 투자, 경기순환, 물가 지표로 이익 사이클의 방향을 점검합니다."),
+    "external": ("대외/수출입", "환율, 국제수지, 수출입, 대외채권·채무로 원화와 외국인 수급 배경을 봅니다."),
+    "household-labor": ("가계/고용", "소득, 분배, 고용, 노동, 인구 지표로 내수 기반과 비용 압력을 봅니다."),
+    "real-estate": ("부동산", "주택가격, 전세가격, 지가, 건설 관련 지표로 금융·건설 리스크를 봅니다."),
+    "corporate": ("기업체력", "기업경영지표로 매출, 이익률, 레버리지 체력을 점검합니다."),
     "playbook": ("섹터 플레이북", "현재 거시 환경에서 업종별 민감도와 선호도를 정리합니다."),
 }
 
@@ -260,6 +266,19 @@ def _stacked_horizontal_bar_chart(frame: pd.DataFrame, label_col: str, value_col
     return _chart_to_base64(fig)
 
 
+def _key_stats_judgement_chart(frame: pd.DataFrame, title: str) -> str:
+    if frame is None or frame.empty or "시장 판단" not in frame.columns:
+        return _horizontal_bar_chart(["No data"], [0.0], title, xlabel="count")
+    order = [("유리", "Favorable"), ("중립", "Neutral"), ("불리", "Unfavorable"), ("판단 보류", "Pending")]
+    counts = frame["시장 판단"].astype(str).value_counts()
+    pairs = [(display, float(counts.get(raw, 0))) for raw, display in order if int(counts.get(raw, 0)) > 0]
+    labels = [display for display, _ in pairs]
+    values = [value for _, value in pairs]
+    if not labels:
+        labels, values = ["No data"], [0.0]
+    return _horizontal_bar_chart(labels, values, title, xlabel="count")
+
+
 def _yield_curve_chart(frame: pd.DataFrame, title: str) -> str:
     data = frame.reindex(columns=YIELD_CURVE_SERIES_IDS).apply(pd.to_numeric, errors="coerce").dropna(how="all")
     fig, ax = plt.subplots(figsize=(7.2, 3.3))
@@ -325,6 +344,10 @@ def _equity_column(dashboard: MacroDashboard) -> str:
         if column in dashboard.market_series.columns or column in dashboard.risk_series.columns:
             return column
     return str(dashboard.market_series.columns[0]) if len(dashboard.market_series.columns) else "KOSPI200"
+
+
+def _columns(frame: pd.DataFrame, names: list[str]) -> list[str]:
+    return [name for name in names if frame is not None and name in frame.columns and not frame[name].dropna().empty]
 
 
 def _page_charts(page: str, dashboard: MacroDashboard) -> str:
@@ -423,11 +446,70 @@ def _page_charts(page: str, dashboard: MacroDashboard) -> str:
         fx_col = "USD/KRW" if "USD/KRW" in dashboard.market_series.columns else "DXY"
         columns = [col for col in domestic.columns if col != fx_col]
         returns_60d = [_return_since_days(domestic[c], 60) for c in columns]
+        ecos = dashboard.ecos100_series
+        fx_map = {
+            "KR_USDKRW": "USD/KRW",
+            "KR_JPYKRW": "JPY/KRW(100)",
+            "KR_EURKRW": "EUR/KRW",
+            "KR_CNYKRW": "CNY/KRW",
+        }
+        usdkrw = ecos["KR_USDKRW"] if "KR_USDKRW" in ecos.columns else dashboard.market_series.get("USD/KRW")
+        eurkrw = ecos["KR_EURKRW"] if "KR_EURKRW" in ecos.columns else None
+        jpykrw = ecos["KR_JPYKRW"] if "KR_JPYKRW" in ecos.columns else None
+        cnykrw = ecos["KR_CNYKRW"] if "KR_CNYKRW" in ecos.columns else None
+        major_left = pd.DataFrame({"USD/KRW": usdkrw}).dropna(how="all") if usdkrw is not None else pd.DataFrame()
+        major_right = pd.DataFrame({"EUR/KRW": eurkrw}).dropna(how="all") if eurkrw is not None else pd.DataFrame()
+        asia_left = pd.DataFrame({"JPY/KRW(100)": jpykrw}).dropna(how="all") if jpykrw is not None else pd.DataFrame()
+        asia_right = pd.DataFrame({"CNY/KRW": cnykrw}).dropna(how="all") if cnykrw is not None else pd.DataFrame()
+        combined_judgement = pd.concat(
+            [
+                dashboard.key_stats_credit_liquidity,
+                dashboard.key_stats_real_economy,
+                dashboard.key_stats_external,
+                dashboard.key_stats_household_labor,
+                dashboard.key_stats_real_estate,
+                dashboard.key_stats_corporate,
+            ],
+            ignore_index=True,
+        ).drop_duplicates(subset=["분류", "지표"], keep="first")
         charts = [
-            ("환율과 국내 비용/활동 지표", _multi_panel_line_chart(domestic[[fx_col, *columns]], f"{fx_col} and Korea Macro Levels")),
+            *(
+                [
+                    (
+                        "원/달러·원/유로 환율",
+                        _dual_axis_line_chart(
+                            major_left,
+                            major_right,
+                            "USD/KRW and EUR/KRW",
+                            left_ylabel="USD/KRW",
+                            right_ylabel="EUR/KRW",
+                        ),
+                    )
+                ]
+                if not major_left.empty or not major_right.empty
+                else []
+            ),
+            *(
+                [
+                    (
+                        "원/엔·원/위안 환율",
+                        _dual_axis_line_chart(
+                            asia_left,
+                            asia_right,
+                            "JPY/KRW(100) and CNY/KRW",
+                            left_ylabel="JPY/KRW(100)",
+                            right_ylabel="CNY/KRW",
+                        ),
+                    )
+                ]
+                if not asia_left.empty or not asia_right.empty
+                else []
+            ),
+            ("국내 비용/활동 지표", _multi_panel_line_chart(domestic[columns], "Korea Macro Levels") if columns else _line_chart(pd.DataFrame(), "Korea Macro Levels")),
             ("국내 비용/활동 60D 변화율", _horizontal_bar_chart([str(c) for c in columns], returns_60d, "Korea Macro 60D Changes", xlabel="%")),
+            ("종합 주식시장 판단 분포", _key_stats_judgement_chart(combined_judgement, "Combined Equity Market Judgement Mix")),
         ]
-    else:
+    elif page == "playbook":
         playbook = dashboard.sector_playbook
         attribution = dashboard.sector_attribution
         charts = [
@@ -443,6 +525,137 @@ def _page_charts(page: str, dashboard: MacroDashboard) -> str:
                 ),
             ),
         ]
+    else:
+        key_frame = {
+            "credit-liquidity": dashboard.key_stats_credit_liquidity,
+            "real-economy": dashboard.key_stats_real_economy,
+            "external": dashboard.key_stats_external,
+            "household-labor": dashboard.key_stats_household_labor,
+            "real-estate": dashboard.key_stats_real_estate,
+            "corporate": dashboard.key_stats_corporate,
+        }.get(page, dashboard.key_stats_overview)
+        charts = [("주식시장 판단 분포", _key_stats_judgement_chart(key_frame, "Equity Market Judgement Mix"))]
+        core = dashboard.core_macro_series
+        ecos = dashboard.ecos100_series
+        if page == "credit-liquidity":
+            liquidity_map = {"KR_DEPOSIT_RATE": "Deposit Rate", "KR_LOAN_RATE": "Loan Rate", "KR_M2": "M2"}
+            liquidity_cols = _columns(ecos, list(liquidity_map))
+            if liquidity_cols:
+                charts.insert(0, ("여수신/유동성 추이", _multi_panel_line_chart(ecos[liquidity_cols].rename(columns=liquidity_map), "Deposit, Loan, Liquidity")))
+            rate_map = {
+                "KR_CALL_RATE": "Call",
+                "KR_KORIBOR_3M": "KORIBOR 3M",
+                "KR_CD_91D": "CD 91D",
+                "KR_CORP_AA_3Y": "Corp AA- 3Y",
+            }
+            rate_cols = _columns(ecos, list(rate_map))
+            if rate_cols:
+                charts.insert(1, ("시장금리 추이", _line_chart(ecos[rate_cols].rename(columns=rate_map), "Korea Money and Credit Rates", ylabel="%")))
+            spread_parts = {}
+            if {"KR_LOAN_RATE", "KR_DEPOSIT_RATE"}.issubset(ecos.columns):
+                spread_parts["Loan-Deposit"] = ecos["KR_LOAN_RATE"] - ecos["KR_DEPOSIT_RATE"]
+            if {"KR_CORP_AA_3Y", "KR_TBOND_3Y"}.issubset(ecos.columns):
+                spread_parts["Corp AA-3Y - Gov 3Y"] = ecos["KR_CORP_AA_3Y"] - ecos["KR_TBOND_3Y"]
+            spread_frame = pd.DataFrame(spread_parts).dropna(how="all")
+            if not spread_frame.empty:
+                charts.insert(2, ("신용/조달 스프레드", _line_chart(spread_frame, "Credit and Funding Spreads", ylabel="%p")))
+        elif page == "real-economy":
+            activity_map = {
+                "KR_ALL_INDUSTRY_PROD": "All Industry",
+                "KR_IPI": "Manufacturing",
+                "KR_SERVICE_PROD": "Services",
+                "KR_RETAIL": "Retail",
+                "KR_AUTO_RETAIL": "Auto Retail",
+                "KR_FACILITY_INVEST": "Facility Inv.",
+            }
+            activity_cols = _columns(ecos, list(activity_map))
+            if activity_cols:
+                charts.insert(0, ("생산/소비/투자 추이", _multi_panel_line_chart(ecos[activity_cols].rename(columns=activity_map), "Production, Retail, Investment")))
+            price_map = {"KR_CPI": "CPI", "KR_PPI": "PPI"}
+            price_cols = _columns(ecos, list(price_map))
+            if price_cols:
+                charts.insert(1, ("물가 추이", _line_chart(ecos[price_cols].rename(columns=price_map), "Inflation Indexes")))
+            cycle_map = {"KR_GDP": "Real GDP", "KR_CCSI": "Consumer Sentiment"}
+            cycle_cols = _columns(ecos, list(cycle_map))
+            if cycle_cols:
+                charts.insert(2, ("성장/심리 추이", _multi_panel_line_chart(ecos[cycle_cols].rename(columns=cycle_map), "Growth and Sentiment")))
+        elif page == "external":
+            ecos = dashboard.ecos100_series
+            balance_map = {
+                "KR_CURRENT_ACCOUNT": "Current Account",
+                "KR_DIRECT_INVEST_ASSET": "Direct Inv. Asset",
+                "KR_DIRECT_INVEST_LIAB": "Direct Inv. Liab.",
+                "KR_PORTFOLIO_INVEST_ASSET": "Portfolio Asset",
+                "KR_PORTFOLIO_INVEST_LIAB": "Portfolio Liab.",
+            }
+            balance_cols = _columns(ecos, list(balance_map))
+            if balance_cols:
+                charts.insert(0, ("국제수지/투자수지", _multi_panel_line_chart(ecos[balance_cols].rename(columns=balance_map), "Balance of Payments and Investment Flows")))
+            trade_map = {
+                "KR_EXPORT_VALUE": "Exports",
+                "KR_IMPORT_VALUE": "Imports",
+                "KR_NET_TERMS_TRADE": "Net Terms",
+                "KR_INCOME_TERMS_TRADE": "Income Terms",
+            }
+            trade_cols = _columns(ecos, list(trade_map))
+            if trade_cols:
+                charts.insert(1, ("수출입/교역조건", _multi_panel_line_chart(ecos[trade_cols].rename(columns=trade_map), "Trade and Terms of Trade")))
+            position_map = {
+                "KR_FX_RESERVES": "FX Reserves",
+                "KR_EXTERNAL_DEBT": "External Debt",
+                "KR_EXTERNAL_CLAIMS": "External Claims",
+            }
+            position_cols = _columns(ecos, list(position_map))
+            if position_cols:
+                charts.insert(2, ("대외 안정성", _multi_panel_line_chart(ecos[position_cols].rename(columns=position_map), "External Resilience")))
+        elif page == "household-labor":
+            labor_map = {
+                "KR_UNRATE": "Unemployment/Legacy",
+                "KR_EMP_RATE": "Employment Rate",
+                "KR_ECON_ACTIVE_POP": "Economically Active",
+                "KR_EMPLOYED_PERSONS": "Employed Persons",
+            }
+            labor_cols = _columns(ecos, list(labor_map))
+            if labor_cols:
+                charts.insert(0, ("고용 추이", _multi_panel_line_chart(ecos[labor_cols].rename(columns=labor_map), "Labor Market Indicators")))
+            demand_map = {"KR_RETAIL": "Retail", "KR_CCSI": "Consumer Sentiment"}
+            demand_cols = _columns(ecos, list(demand_map))
+            if demand_cols:
+                charts.insert(1, ("가계 수요 추이", _multi_panel_line_chart(ecos[demand_cols].rename(columns=demand_map), "Household Demand Indicators")))
+            burden_map = {"KR_LOAN_RATE": "Loan Rate", "KR_CPI": "CPI"}
+            burden_cols = _columns(ecos, list(burden_map))
+            if burden_cols:
+                charts.insert(2, ("가계 부담 지표", _multi_panel_line_chart(ecos[burden_cols].rename(columns=burden_map), "Household Cost Burden")))
+        elif page == "real-estate":
+            property_map = {
+                "KR_HOUSE_PRICE": "House Price",
+                "KR_RENT_PRICE": "Jeonse Price",
+                "KR_LAND_PRICE_CHANGE": "Land Price MoM",
+                "KR_CONSTRUCTION_COMPLETED": "Construction Completed",
+                "KR_CONSTRUCTION_ORDERS": "Construction Orders",
+                "KR_CONSTRUCTION_STARTS": "Construction Starts",
+            }
+            property_cols = _columns(ecos, list(property_map))
+            if property_cols:
+                charts.insert(0, ("부동산/건설 추이", _multi_panel_line_chart(ecos[property_cols].rename(columns=property_map), "Real Estate and Construction")))
+            rate_map = {"KR_LOAN_RATE": "Loan Rate", "KR_CD_91D": "CD 91D"}
+            rate_cols = _columns(ecos, list(rate_map))
+            if rate_cols:
+                charts.insert(1, ("부동산 금리 환경", _line_chart(ecos[rate_cols].rename(columns=rate_map), "Rate Backdrop for Real Estate", ylabel="%")))
+            demand_map = {"KR_RETAIL": "Retail", "KR_CCSI": "Consumer Sentiment"}
+            demand_cols = _columns(ecos, list(demand_map))
+            if demand_cols:
+                charts.insert(2, ("부동산 수요 배경", _multi_panel_line_chart(ecos[demand_cols].rename(columns=demand_map), "Demand Backdrop for Real Estate")))
+        elif page == "corporate":
+            cols = _columns(core, ["Industrial Production", "Retail Sales", "CPI"])
+            if cols:
+                charts.insert(0, ("매출/마진 매크로 배경", _multi_panel_line_chart(core[cols], "Corporate Sales and Cost Backdrop")))
+            if equity_col in dashboard.market_series.columns:
+                charts.insert(1, ("주식시장 추이", _line_chart(dashboard.market_series[[equity_col]], f"{equity_col} Trend")))
+            cost_map = {"KR_PPI": "PPI", "KR_CORP_AA_3Y": "Corp AA-3Y"}
+            cost_cols = _columns(ecos, list(cost_map))
+            if cost_cols:
+                charts.insert(2, ("기업 비용/조달 환경", _multi_panel_line_chart(ecos[cost_cols].rename(columns=cost_map), "Corporate Cost and Funding Backdrop")))
     return '<div class="macro-grid two macro-chart-grid">' + "".join(_chart_card(title, image) for title, image in charts) + "</div>"
 
 
@@ -457,6 +670,7 @@ def _overview_page(dashboard: MacroDashboard) -> str:
       <section class="service-card"><h2>거시 점수</h2>{_score_bars(dashboard.scores)}</section>
     </div>
     <section class="service-card"><h2>주요 지표</h2>{_table(dashboard.indicators)}</section>
+    <section class="service-card"><h2>ECOS 100대지표 핵심 체크</h2>{_table(dashboard.key_stats_overview, table_class="macro-wide-table")}</section>
     """
 
 
@@ -488,6 +702,7 @@ def _rates_page(dashboard: MacroDashboard) -> str:
     {_page_charts("rates", dashboard)}
     <section class="service-card"><h2>커브 진단</h2>{_table(dashboard.rate_diagnostics, table_class="macro-wide-table")}</section>
     <section class="service-card"><h2>금리와 커브</h2>{_table(dashboard.rates, table_class="macro-rates-table")}</section>
+    <section class="service-card"><h2>금리 100대지표</h2>{_table(dashboard.key_stats_rates, table_class="macro-wide-table")}</section>
     <section class="service-card"><h2>해석</h2><p class="service-muted">2년 금리는 시장이 예상하는 정책금리 경로, 10년 금리는 성장·물가·기간프리미엄이 섞인 장기 할인율, 10Y-2Y와 10Y-3M 스프레드는 경기 사이클의 압력을 읽는 지표입니다. 금리 레벨과 커브 방향을 같이 봐야 성장주 멀티플 부담인지, 경기 둔화 신호인지 구분할 수 있습니다.</p></section>
     """
 
@@ -510,6 +725,17 @@ def _dollar_page(dashboard: MacroDashboard) -> str:
     {_page_charts("dollar", dashboard)}
     <section class="service-card"><h2>환율 민감도</h2>{_table(dashboard.dollar_sensitivity, table_class="macro-wide-table")}</section>
     <section class="service-card"><h2>국내 비용/활동 지표</h2>{_table(dashboard.dollar_commodities)}</section>
+    <section class="service-card"><h2>환율/대외 100대지표</h2>{_table(dashboard.key_stats_external, table_class="macro-wide-table")}</section>
+    """
+
+
+def _key_stats_page(dashboard: MacroDashboard, page: str, frame: pd.DataFrame) -> str:
+    return f"""
+    {_hero(dashboard, PAGES[page][1])}
+    {_macro_nav(page)}
+    {_page_charts(page, dashboard)}
+    <section class="service-card"><h2>{html.escape(PAGES[page][0])} 100대지표</h2>{_table(frame, table_class="macro-wide-table")}</section>
+    <section class="service-card"><h2>해석 기준</h2><p class="service-muted">이 표의 시장 판단은 최신 레벨을 주식시장 관점에서 빠르게 분류한 보조 의견입니다. 시계열 방향, 업종별 가격 전가력, 기업 이익 추정과 함께 확인할 때 의미가 커집니다.</p></section>
     """
 
 
@@ -540,6 +766,12 @@ def render_body(
         "rates": _rates_page,
         "risk": _risk_page,
         "dollar": _dollar_page,
+        "credit-liquidity": lambda dash: _key_stats_page(dash, "credit-liquidity", dash.key_stats_credit_liquidity),
+        "real-economy": lambda dash: _key_stats_page(dash, "real-economy", dash.key_stats_real_economy),
+        "external": lambda dash: _key_stats_page(dash, "external", dash.key_stats_external),
+        "household-labor": lambda dash: _key_stats_page(dash, "household-labor", dash.key_stats_household_labor),
+        "real-estate": lambda dash: _key_stats_page(dash, "real-estate", dash.key_stats_real_estate),
+        "corporate": lambda dash: _key_stats_page(dash, "corporate", dash.key_stats_corporate),
         "playbook": _playbook_page,
     }[active](dashboard)
     return f"""

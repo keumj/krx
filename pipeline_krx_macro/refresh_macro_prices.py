@@ -12,6 +12,11 @@ import pandas as pd
 import requests
 
 try:
+    from dotenv import load_dotenv
+except Exception:  # pragma: no cover - optional dependency
+    load_dotenv = None
+
+try:
     from fredapi import Fred
 except Exception:  # pragma: no cover - optional dependency
     Fred = None
@@ -38,6 +43,9 @@ from .macro_data_store import (
     normalize_series,
     read_local_series,
 )
+
+if load_dotenv is not None:
+    load_dotenv()
 
 
 @dataclass(frozen=True)
@@ -177,6 +185,7 @@ def _fetch_ecos_series(api_key: str, spec: MacroSeriesSpec, start: pd.Timestamp)
     try:
         response = requests.get(url, timeout=30)
         response.raise_for_status()
+        response.encoding = "utf-8"
         payload = response.json()
     except Exception as exc:
         _log(f"ECOS failed for {spec.series_id} ({spec.ecos_stat_code}): {type(exc).__name__}: {_safe_error_message(exc, api_key)}")
@@ -206,6 +215,57 @@ def _fetch_ecos_series(api_key: str, spec: MacroSeriesSpec, start: pd.Timestamp)
     if series.empty:
         return None, None
     return series, f"ecos:{spec.ecos_stat_code}:{spec.ecos_cycle}:{spec.ecos_item_code1 or ''}"
+
+
+def _pick_key_stat(row: dict, *names: str) -> str:
+    for name in names:
+        value = row.get(name)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return ""
+
+
+def _fetch_ecos_key_statistics(api_key: str) -> tuple[pd.DataFrame, str | None]:
+    if not api_key:
+        return pd.DataFrame(), None
+    url = f"https://ecos.bok.or.kr/api/KeyStatisticList/{api_key}/json/kr/1/100"
+    try:
+        response = requests.get(url, timeout=30)
+        response.raise_for_status()
+        response.encoding = "utf-8"
+        payload = response.json()
+    except Exception as exc:
+        _log(f"ECOS KeyStatisticList failed: {type(exc).__name__}: {_safe_error_message(exc, api_key)}")
+        return pd.DataFrame(), None
+    body = payload.get("KeyStatisticList") if isinstance(payload, dict) else None
+    rows = body.get("row") if isinstance(body, dict) else None
+    if not rows:
+        err = payload.get("RESULT") if isinstance(payload, dict) else None
+        msg = err.get("MESSAGE") if isinstance(err, dict) else "empty response"
+        _log(f"ECOS KeyStatisticList missing: {msg}")
+        return pd.DataFrame(), None
+    out_rows: list[dict[str, object]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        class_name = _pick_key_stat(row, "CLASS_NAME", "CLASS_NM", "class_name", "분류")
+        statistic_name = _pick_key_stat(row, "KEYSTAT_NAME", "STAT_NAME", "STAT_NM", "통계명", "100대통계명")
+        time = _pick_key_stat(row, "TIME", "CYCLE", "시점")
+        unit = _pick_key_stat(row, "UNIT_NAME", "UNIT_NM", "UNIT", "단위")
+        value = pd.to_numeric(_pick_key_stat(row, "DATA_VALUE", "VALUE", "ECOS값"), errors="coerce")
+        if not class_name or not statistic_name:
+            continue
+        out_rows.append(
+            {
+                "class_name": class_name,
+                "statistic_name": statistic_name,
+                "time": time,
+                "value": float(value) if not pd.isna(value) else None,
+                "unit": unit,
+            }
+        )
+    frame = pd.DataFrame(out_rows)
+    return frame, "ecos:KeyStatisticList"
 
 
 def _fetch_yahoo_series(spec: MacroSeriesSpec, start: pd.Timestamp) -> tuple[pd.Series | None, str | None]:
@@ -385,6 +445,41 @@ def _upsert_series(conn: sqlite3.Connection, spec: MacroSeriesSpec, series: pd.S
     return len(rows)
 
 
+def _upsert_key_statistics(conn: sqlite3.Connection, frame: pd.DataFrame, source: str) -> int:
+    if frame is None or frame.empty:
+        return 0
+    rows = []
+    for _, row in frame.iterrows():
+        rows.append(
+            (
+                str(row.get("class_name", "")).strip(),
+                str(row.get("statistic_name", "")).strip(),
+                str(row.get("time", "")).strip(),
+                None if pd.isna(row.get("value")) else float(row.get("value")),
+                str(row.get("unit", "") or "").strip(),
+                source,
+            )
+        )
+    rows = [row for row in rows if row[0] and row[1]]
+    if not rows:
+        return 0
+    conn.execute("DELETE FROM macro_key_statistics")
+    conn.executemany(
+        """
+        INSERT INTO macro_key_statistics (class_name, statistic_name, time, value, unit, source, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(class_name, statistic_name) DO UPDATE SET
+            time=excluded.time,
+            value=excluded.value,
+            unit=excluded.unit,
+            source=excluded.source,
+            updated_at=CURRENT_TIMESTAMP
+        """,
+        rows,
+    )
+    return len(rows)
+
+
 def refresh_macro_prices(
     *,
     db_path: str | Path | None = None,
@@ -423,6 +518,13 @@ def refresh_macro_prices(
             count = _upsert_series(conn, spec, series, source)
             changed += count
             _log(f"{spec.series_id}: rows={count} source={source}")
+
+        if ecos_key:
+            key_stats, key_source = _fetch_ecos_key_statistics(ecos_key)
+            if key_source and not key_stats.empty:
+                count = _upsert_key_statistics(conn, key_stats, key_source)
+                changed += count
+                _log(f"ECOS 100 key statistics: rows={count} source={key_source}")
 
         row = conn.execute("SELECT MIN(date), MAX(date), COUNT(*), COUNT(DISTINCT series_id) FROM macro_series").fetchone()
         conn.commit()
