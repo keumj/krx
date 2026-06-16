@@ -35,6 +35,7 @@ _REQUIRED_DASHBOARD_ATTRS = {
     "key_stats_corporate",
     "core_macro_series",
     "ecos100_series",
+    "display_series_version",
 }
 
 
@@ -44,7 +45,7 @@ def _dashboard_is_compatible(dashboard: object | None) -> bool:
     ecos100 = getattr(dashboard, "ecos100_series", None)
     columns = getattr(ecos100, "columns", [])
     required_series = {"KR_USDKRW", "KR_JPYKRW", "KR_EURKRW", "KR_CNYKRW"}
-    return required_series.issubset(set(columns))
+    return required_series.issubset(set(columns)) and getattr(dashboard, "display_series_version", 0) >= 3
 
 
 def _remember_dashboard(dashboard: object, *, start_date: str | None, lookback_days: int) -> None:

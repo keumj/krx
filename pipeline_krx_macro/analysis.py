@@ -65,6 +65,7 @@ class MacroDashboard:
     commodity_series: pd.DataFrame
     core_macro_series: pd.DataFrame
     ecos100_series: pd.DataFrame
+    display_series_version: int = 3
 
 
 def _latest_value(series: pd.Series) -> float:
@@ -1518,7 +1519,7 @@ def build_macro_dashboard(
             m2.rename("M2"),
         ],
         axis=1,
-    ).sort_index().ffill().tail(tail_n).dropna(how="all")
+    ).sort_index().tail(tail_n).dropna(how="all")
     baa_aaa_spread = (baa_spread - aaa_spread).dropna().rename("Baa-AAA Spread")
     dgs2 = yields["DGS2"] if "DGS2" in yields else pd.Series(dtype=float)
     dgs3m = yields["DGS3MO"] if "DGS3MO" in yields else pd.Series(dtype=float)
@@ -1786,13 +1787,13 @@ def build_macro_dashboard(
             real_gdp.rename("Real GDP"),
         ],
         axis=1,
-    ).sort_index().ffill().tail(tail_n).dropna(how="all")
+    ).sort_index().tail(tail_n).dropna(how="all")
     ecos100_ids = [spec.series_id for spec in [*KOREA_MACRO_SPECS, *ECOS_100_TIMESERIES_SPECS]]
     ecos100_series, _ = read_macro_frame(ecos100_ids, start_date=start)
     if ecos100_series is None:
         ecos100_series = pd.DataFrame()
     else:
-        ecos100_series = ecos100_series.ffill().tail(tail_n).dropna(how="all")
+        ecos100_series = ecos100_series.tail(tail_n).dropna(how="all")
 
     return MacroDashboard(
         as_of_date=as_of,
@@ -1831,4 +1832,5 @@ def build_macro_dashboard(
         commodity_series=domestic_series,
         core_macro_series=core_macro_series,
         ecos100_series=ecos100_series,
+        display_series_version=3,
     )

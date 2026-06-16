@@ -116,6 +116,27 @@ def _chart_to_base64(fig) -> str:
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
+def _keeps_step_shape(label: object) -> bool:
+    text = str(label).strip().lower()
+    return text in {"base rate", "korea base rate", "kr_base_rate", "fedfunds"} or "기준금리" in text
+
+
+def _plot_points_series(series: pd.Series, label: object) -> pd.Series:
+    clean = pd.to_numeric(series, errors="coerce").dropna().sort_index()
+    if clean.empty or _keeps_step_shape(label):
+        return clean
+    if isinstance(clean.index, pd.DatetimeIndex):
+        clean = clean[~clean.index.duplicated(keep="last")]
+    values = clean.astype(float)
+    changed = values.ne(values.shift())
+    plotted = clean[changed.fillna(True)]
+    return plotted if not plotted.empty else clean
+
+
+def _line_marker(series: pd.Series, label: object) -> str | None:
+    return None if _keeps_step_shape(label) or len(series) > 400 else "o"
+
+
 def _line_chart(frame: pd.DataFrame, title: str, *, ylabel: str = "", normalize: bool = False, tail: int = DEFAULT_LOOKBACK_DAYS) -> str:
     data = _normalize(frame) if normalize else frame.copy()
     data = data.tail(tail).apply(pd.to_numeric, errors="coerce").dropna(how="all")
@@ -124,9 +145,9 @@ def _line_chart(frame: pd.DataFrame, title: str, *, ylabel: str = "", normalize:
         ax.text(0.5, 0.5, "No data", ha="center", va="center")
     else:
         for col in data.columns:
-            series = data[col].dropna()
+            series = _plot_points_series(data[col], col)
             if not series.empty:
-                ax.plot(series.index, series.values, linewidth=1.8, label=str(col))
+                ax.plot(series.index, series.values, linewidth=1.8, marker=_line_marker(series, col), markersize=2.4, label=str(col))
         ax.legend(loc="best", fontsize=8, frameon=False)
     ax.set_title(title, fontsize=11, loc="left")
     ax.set_ylabel(ylabel)
@@ -147,8 +168,8 @@ def _multi_panel_line_chart(frame: pd.DataFrame, title: str, *, tail: int = DEFA
         axes[0].text(0.5, 0.5, "No data", ha="center", va="center")
     else:
         for ax, col in zip(axes, columns):
-            series = data[col].dropna()
-            ax.plot(series.index, series.values, linewidth=1.7, label=str(col))
+            series = _plot_points_series(data[col], col)
+            ax.plot(series.index, series.values, linewidth=1.7, marker=_line_marker(series, col), markersize=2.2, label=str(col))
             ax.set_ylabel(str(col), fontsize=8)
             ax.grid(True, alpha=0.22)
             ax.tick_params(axis="x", labelrotation=18, labelsize=7)
@@ -186,13 +207,13 @@ def _dual_axis_line_chart(
         left_lines = []
         right_lines = []
         for col in left.columns:
-            series = left[col].dropna()
+            series = _plot_points_series(left[col], col)
             if not series.empty:
-                left_lines.extend(ax_left.plot(series.index, series.values, linewidth=1.9, label=str(col)))
+                left_lines.extend(ax_left.plot(series.index, series.values, linewidth=1.9, marker=_line_marker(series, col), markersize=2.4, label=str(col)))
         for col in right.columns:
-            series = right[col].dropna()
+            series = _plot_points_series(right[col], col)
             if not series.empty:
-                right_lines.extend(ax_right.plot(series.index, series.values, linewidth=1.7, linestyle="--", label=str(col)))
+                right_lines.extend(ax_right.plot(series.index, series.values, linewidth=1.7, linestyle="--", marker=_line_marker(series, col), markersize=2.4, label=str(col)))
         lines = left_lines + right_lines
         if lines:
             ax_left.legend(lines, [line.get_label() for line in lines], loc="best", fontsize=8, frameon=False)
