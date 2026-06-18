@@ -45,8 +45,8 @@ echo  [1] Refresh KRX prices / market caps / shares / shared SQLite ^(+ EPS back
 echo  [2] Refresh KRX DART quarterly fundamentals in shared SQLite ^(+ shares/EPS sync^)
 echo  [3] Refresh KRX news incrementally ^(Naver + Google low-coverage supplement^)
 echo  [4] Refresh KRX macro market/FRED data in macro SQLite
-echo  [5] Run latest-data refresh jobs ^(without news^)
-echo  [6] Run latest-data refresh jobs ^(with news^)
+echo  [5] Run latest-data refresh jobs ^(without fundamentals^)
+echo  [6] Run latest-data refresh jobs ^(with fundamentals^)
 echo  [0] Exit
 echo.
 
@@ -61,15 +61,15 @@ if "%CHOICE%"=="1" goto :stock
 if "%CHOICE%"=="2" goto :quarterly
 if "%CHOICE%"=="3" goto :news
 if "%CHOICE%"=="4" goto :macro
-if "%CHOICE%"=="5" goto :all
-if "%CHOICE%"=="6" goto :all_with_news
+if "%CHOICE%"=="5" goto :all_without_fundamentals
+if "%CHOICE%"=="6" goto :all_with_fundamentals
 if /i "%CHOICE%"=="stock" goto :stock
 if /i "%CHOICE%"=="quarterly" goto :quarterly
 if /i "%CHOICE%"=="news" goto :news
 if /i "%CHOICE%"=="macro" goto :macro
-if /i "%CHOICE%"=="all" goto :all
-if /i "%CHOICE%"=="all-news" goto :all_with_news
-if /i "%CHOICE%"=="with-news" goto :all_with_news
+if /i "%CHOICE%"=="all" goto :all_without_fundamentals
+if /i "%CHOICE%"=="without-fundamentals" goto :all_without_fundamentals
+if /i "%CHOICE%"=="with-fundamentals" goto :all_with_fundamentals
 
 echo Invalid option.
 goto :done
@@ -124,29 +124,39 @@ set "REFRESH_OK=1"
 call :show_latest macro
 goto :status
 
-:all
+:all_without_fundamentals
 call :run_module pipeline_common.refresh_krx_shared_prices
 if errorlevel 1 (
   set "EXIT_CODE=%ERRORLEVEL%"
   goto :status
 )
 call :show_latest stock
-call :run_module pipeline_krx.refresh_dart_auto_fundamentals
-if errorlevel 1 (
-  set "EXIT_CODE=%ERRORLEVEL%"
-  goto :status
-)
-call :show_latest quarterly
 call :run_module pipeline_krx_macro.refresh_macro_prices --years 10 --daily-core --require-ecos
 if errorlevel 1 (
   set "EXIT_CODE=%ERRORLEVEL%"
   goto :status
 )
 call :show_latest macro
+call :ensure_naver_news_credentials
+if errorlevel 1 (
+  set "EXIT_CODE=%ERRORLEVEL%"
+  goto :status
+)
+call :run_module pipeline_krx.refresh_news --provider naver --max-items 100 --timeout 10 --request-delay 0.1 --components-csv data\krx_components.csv --db-path data\krx_shared_db\krx_shared_prices.sqlite
+if errorlevel 1 (
+  set "EXIT_CODE=%ERRORLEVEL%"
+  goto :status
+)
+call :run_module pipeline_krx.refresh_news --provider google --max-items 100 --timeout 10 --request-delay 0.1 --google-hl ko --google-gl KR --google-ceid KR:ko --max-existing-articles 3 --components-csv data\krx_components.csv --db-path data\krx_shared_db\krx_shared_prices.sqlite
+if errorlevel 1 (
+  set "EXIT_CODE=%ERRORLEVEL%"
+  goto :status
+)
+call :show_latest news
 set "REFRESH_OK=1"
 goto :status
 
-:all_with_news
+:all_with_fundamentals
 call :run_module pipeline_common.refresh_krx_shared_prices
 if errorlevel 1 (
   set "EXIT_CODE=%ERRORLEVEL%"
