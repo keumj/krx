@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+from urllib.parse import quote
 
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -179,6 +180,14 @@ def portfolio_home(request: Request) -> RedirectResponse:
 @router.get("/stock")
 def stock_home(request: Request) -> RedirectResponse:
     return _redirect_with_query(request, "/stock/financials")
+
+
+@router.get("/redirect_stock_lab")
+def legacy_redirect_stock_lab(ticker: str = "", intent: str | None = None) -> RedirectResponse:
+    query = f"ticker={quote(str(ticker or '').strip().upper())}"
+    if intent:
+        query += f"&intent={quote(str(intent))}"
+    return RedirectResponse(f"/stock/financials?{query}", status_code=303)
 
 
 @router.get("/stock-news")

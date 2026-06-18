@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime
 import threading
 from typing import Callable
+from urllib.parse import parse_qs, urlencode, urlparse
 
 from bs4 import BeautifulSoup
 
@@ -104,6 +105,24 @@ def _polish_data_entry_form(soup: BeautifulSoup) -> None:
             label = wrapper.find("label") if wrapper is not None else None
             if label is not None:
                 label.string = "금액 (KRW)"
+
+
+def _rewrite_stock_lab_links(soup: BeautifulSoup) -> None:
+    for link in soup.find_all("a", href=True):
+        href = str(link.get("href") or "")
+        parsed = urlparse(href)
+        if parsed.path != "/redirect_stock_lab":
+            continue
+        params = parse_qs(parsed.query)
+        ticker = str(params.get("ticker", [""])[0] or "").strip().upper()
+        if not ticker:
+            continue
+        query = {"ticker": ticker}
+        intent = str(params.get("intent", [""])[0] or "").strip()
+        if intent:
+            query["intent"] = intent
+        link["href"] = f"/stock/financials?{urlencode(query)}"
+        link.attrs.pop("onclick", None)
 
 
 @dataclass
@@ -230,6 +249,7 @@ def _prepare_portfolio_html(page: str, html: str, *, user: AuthUser | None = Non
     _place_portfolio_description_before_nav(soup)
     if page == "data-entry":
         _polish_data_entry_form(soup)
+    _rewrite_stock_lab_links(soup)
     if soup is not None:
         html = str(soup)
     if page not in HISTORICAL_PAGES:

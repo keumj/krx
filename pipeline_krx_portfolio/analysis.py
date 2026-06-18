@@ -15,7 +15,9 @@ from pipeline_common.notebook_data import load_krx_components
 from pipeline_common.shared_fundamentals import derive_shared_fundamental_metrics
 from pipeline_common.shared_krx_prices_sql import (
     load_shared_close_prices_for_symbols,
+    load_shared_dividend_yields_for_symbols,
     load_shared_market_caps_for_symbols,
+    load_shared_total_return_index_for_symbols,
     shared_prices_sqlite_path,
 )
 from pipeline_krx_stock_news.analysis import heuristic_title_sentiment
@@ -692,6 +694,103 @@ def _load_close_history(
         "price_source": close_source or "sqlite",
         "market_cap_source": caps_source or "sqlite",
     }
+
+
+def _clean_history_frame(frame: pd.DataFrame | None) -> pd.DataFrame:
+    out = frame.copy() if frame is not None else pd.DataFrame()
+    if out.empty:
+        return out
+    out.index = pd.to_datetime(out.index, errors="coerce")
+    out = out[~out.index.isna()].sort_index()
+    out = out.apply(pd.to_numeric, errors="coerce").dropna(how="all", axis=1)
+    return out
+
+
+def _load_dividend_yield_history(
+    tickers: list[str],
+    *,
+    start_date: str,
+    end_date: str | None = None,
+    shared_db: Path | str | None = None,
+) -> tuple[pd.DataFrame, str]:
+    if not tickers:
+        return pd.DataFrame(), "empty"
+    yields, source = load_shared_dividend_yields_for_symbols(
+        tickers,
+        start_date=start_date,
+        end_date=end_date,
+        db_path=_shared_db_path(shared_db),
+    )
+    return _clean_history_frame(yields), source or "sqlite"
+
+
+def _benchmark_total_return_history(
+    close_history: pd.DataFrame,
+    dividend_yields: pd.DataFrame,
+) -> tuple[pd.DataFrame, str]:
+    close = _clean_history_frame(close_history)
+    if close.empty:
+        return pd.DataFrame(), "total_return_unavailable:empty_close"
+
+    price_returns = close.sort_index().pct_change(fill_method=None)
+    yields = _clean_history_frame(dividend_yields).reindex(index=close.index, columns=close.columns)
+    if yields.empty:
+        annual_yield = pd.DataFrame(0.0, index=close.index, columns=close.columns)
+        yield_coverage = 0.0
+    else:
+        annual_yield = yields.ffill().bfill().clip(lower=0.0, upper=100.0).fillna(0.0)
+        yield_coverage = float(yields.notna().sum().sum() / max(close.notna().sum().sum(), 1))
+
+    daily_income_returns = annual_yield / 100.0 / 252.0
+    total_returns = (price_returns + daily_income_returns).where(price_returns.notna())
+    first_prices = close.apply(lambda col: col.dropna().iloc[0] if not col.dropna().empty else np.nan)
+    total_index = (1.0 + total_returns.fillna(0.0)).cumprod().mul(first_prices, axis=1)
+    total_index = total_index.where(close.notna()).dropna(how="all", axis=1)
+    basis = f"total_return_proxy: close.pct_change + dividend_yield/252; dividend_yield_observation_coverage={yield_coverage:.2%}"
+    return total_index, basis
+
+
+def _load_total_return_history(
+    tickers: list[str],
+    *,
+    close_history: pd.DataFrame,
+    start_date: str,
+    end_date: str | None = None,
+    shared_db: Path | str | None = None,
+) -> tuple[pd.DataFrame, str]:
+    stored, stored_source = load_shared_total_return_index_for_symbols(
+        tickers,
+        start_date=start_date,
+        end_date=end_date,
+        db_path=_shared_db_path(shared_db),
+    )
+    total_return = _clean_history_frame(stored)
+    close = _clean_history_frame(close_history)
+    yields, yield_source = _load_dividend_yield_history(
+        tickers,
+        start_date=start_date,
+        end_date=end_date,
+        shared_db=shared_db,
+    )
+    fallback, basis = _benchmark_total_return_history(close_history, yields)
+    if not total_return.empty and not close.empty:
+        total_return = total_return.reindex(index=close.index)
+        base_close = close.apply(lambda col: col.dropna().iloc[0] if not col.dropna().empty else np.nan)
+        base_index = total_return.apply(lambda col: col.dropna().iloc[0] if not col.dropna().empty else np.nan)
+        scale = (base_close / base_index.replace(0.0, np.nan)).replace([np.inf, -np.inf], np.nan)
+        total_return = total_return.mul(scale, axis=1)
+        total_return = total_return.where(close.notna()).dropna(how="all", axis=1)
+        missing_cols = [col for col in close.columns if col not in total_return.columns]
+        if missing_cols and not fallback.empty:
+            total_return = pd.concat([total_return, fallback.reindex(index=close.index, columns=missing_cols)], axis=1)
+            total_return = total_return.reindex(columns=close.columns).dropna(how="all", axis=1)
+        if not total_return.empty:
+            source = f"{stored_source or 'sqlite'}:total_return_index"
+            if missing_cols:
+                source += f"; fallback_missing={len(missing_cols)}; {basis}; dividend_yield_source={yield_source}"
+            return total_return, source
+
+    return fallback, f"{basis}; dividend_yield_source={yield_source}"
 
 
 def _current_positions_from_trades(
@@ -3015,9 +3114,16 @@ def build_portfolio_dashboard(
         end_date=end_ts.strftime("%Y-%m-%d"),
         shared_db=shared_db,
     )
+    total_return_history, total_return_source = _load_total_return_history(
+        tickers,
+        close_history=close_history,
+        start_date=start_ts.strftime("%Y-%m-%d"),
+        end_date=end_ts.strftime("%Y-%m-%d"),
+        shared_db=shared_db,
+    )
     positions, as_of_date = _build_positions_frame(positions_raw, close_history=close_history)
-    holdings_performance = _build_holdings_performance(positions, close_history)
-    portfolio_daily = _portfolio_return_series(close_history, positions)
+    holdings_performance = _build_holdings_performance(positions, total_return_history)
+    portfolio_daily = _portfolio_return_series(total_return_history, positions)
 
     sector_frame, _ = _load_component_frame(max_symbols=0)
     universe = sector_frame["Symbol"].astype(str).tolist()
@@ -3030,16 +3136,35 @@ def build_portfolio_dashboard(
         end_date=end_ts.strftime("%Y-%m-%d"),
         shared_db=shared_db,
     )
+    benchmark_dividend_yields, benchmark_dividend_yield_source = _load_dividend_yield_history(
+        benchmark_symbols,
+        start_date=start_ts.strftime("%Y-%m-%d"),
+        end_date=end_ts.strftime("%Y-%m-%d"),
+        shared_db=shared_db,
+    )
+    benchmark_total_return_close, benchmark_return_basis = _load_total_return_history(
+        benchmark_symbols,
+        close_history=benchmark_close,
+        start_date=start_ts.strftime("%Y-%m-%d"),
+        end_date=end_ts.strftime("%Y-%m-%d"),
+        shared_db=shared_db,
+    )
     explicit_benchmark_weights = (
         benchmark_frame.set_index("Symbol")["benchmark_weight"]
         if not benchmark_frame.empty and "benchmark_weight" in benchmark_frame.columns
         else None
     )
-    benchmark_daily, sector_returns, benchmark_weights = _benchmark_series(
+    benchmark_price_daily, _, benchmark_weights = _benchmark_series(
         close_history=benchmark_close,
         market_caps=benchmark_caps,
         sector_frame=benchmark_sector_frame,
         benchmark_weights=explicit_benchmark_weights,
+    )
+    benchmark_daily, sector_returns, benchmark_weights = _benchmark_series(
+        close_history=benchmark_total_return_close,
+        market_caps=benchmark_caps,
+        sector_frame=benchmark_sector_frame,
+        benchmark_weights=benchmark_weights,
     )
     direct_benchmark_daily, direct_benchmark_source = _direct_kospi200_daily_returns(start_ts, end_ts)
     performance_benchmark_daily = benchmark_daily
@@ -3048,35 +3173,35 @@ def build_portfolio_dashboard(
     holdings_performance["style_bucket"] = holdings_performance["ticker"].map(style_map).fillna("Unknown")
     stock_attribution, attribution, style_attribution = _build_relative_attribution_tables(
         positions,
-        close_history,
-        benchmark_close,
+        total_return_history,
+        benchmark_total_return_close,
         benchmark_weights,
         benchmark_sector_frame,
         style_map=style_map,
     )
     relative_decomposition = _build_relative_decomposition(stock_attribution)
-    holding_returns = _holding_returns(close_history)
+    holding_returns = _holding_returns(total_return_history)
     risk_summary, risk_contribution, relative_risk_summary = _build_risk_summary(
         positions, holding_returns, portfolio_daily, performance_benchmark_daily
     )
     active_risk_contribution = _build_active_risk_contribution(
         positions,
         benchmark_weights,
-        benchmark_close,
+        benchmark_total_return_close,
         benchmark_sector_frame,
         style_map=style_map,
     )
     relative_risk_decomposition = _build_relative_risk_decomposition(
         positions,
         benchmark_weights,
-        benchmark_close,
+        benchmark_total_return_close,
         benchmark_sector_frame,
         style_map=style_map,
     )
     stock_selection_risk = _build_stock_selection_risk_decomposition(
         positions,
         benchmark_weights,
-        benchmark_close,
+        benchmark_total_return_close,
         benchmark_sector_frame,
         style_map=style_map,
     )
@@ -3159,14 +3284,16 @@ def build_portfolio_dashboard(
         "benchmark_component_source": benchmark_component_source,
         "price_source": position_sources.get("price_source", "sqlite"),
         "benchmark_price_source": benchmark_sources.get("price_source", "sqlite"),
+        "benchmark_dividend_yield_source": benchmark_dividend_yield_source,
+        "benchmark_return_basis": benchmark_return_basis,
         "performance_benchmark_source": benchmark_component_source,
         "direct_kospi200_index_source": direct_benchmark_source,
         "financial_metric_source": financial_source,
         "style_source": style_source,
         "cash_warning": cash_warning,
-        "portfolio_return_basis": "NAV: sum(shares * close) + CASH; daily returns are NAV.pct_change()",
+        "portfolio_return_basis": f"NAV proxy: sum(shares * total_return_price) + CASH; total_return_source={total_return_source}",
     }
-    diagnostics.update(_kospi200_consistency_diagnostics(benchmark_daily, start_ts, end_ts))
+    diagnostics.update(_kospi200_consistency_diagnostics(benchmark_price_daily, start_ts, end_ts))
     return PortfolioDashboard(
         as_of_date=as_of_date,
         trades=trades,
@@ -3235,6 +3362,13 @@ def analyze_virtual_trade(
         end_date=end_ts.strftime("%Y-%m-%d"),
         shared_db=shared_db,
     )
+    total_return_history, _ = _load_total_return_history(
+        sorted(set(before.positions["ticker"].astype(str).tolist() + [ticker_clean])),
+        close_history=close_history,
+        start_date=start_ts.strftime("%Y-%m-%d"),
+        end_date=end_ts.strftime("%Y-%m-%d"),
+        shared_db=shared_db,
+    )
     inferred_price = float(close_history[ticker_clean].dropna().iloc[-1]) if ticker_clean in close_history.columns and not close_history[ticker_clean].dropna().empty else np.nan
     trade_price = float(price) if price is not None else inferred_price
     if not np.isfinite(trade_price) or trade_price <= 0:
@@ -3264,7 +3398,7 @@ def analyze_virtual_trade(
     sector_map, component_source = _sector_map(max_symbols=500)
     positions_after_raw = _current_positions_from_trades(combined, sector_map=sector_map)
     positions_after, as_of_date = _build_positions_frame(positions_after_raw, close_history=close_history)
-    holdings_after = _build_holdings_performance(positions_after, close_history)
+    holdings_after = _build_holdings_performance(positions_after, total_return_history)
 
     # 가상 거래 후 현금 잔고 체크
     cash_warning = ""
@@ -3272,7 +3406,7 @@ def analyze_virtual_trade(
     if not cash_row_after.empty and float(cash_row_after.iloc[0]["net_quantity"]) < 0:
         cash_warning = f"가상 거래 경고: 실행 시 예상 현금 잔고가 마이너스({abs(float(cash_row_after.iloc[0]['net_quantity'])):,.0f} KRW)가 됩니다."
 
-    portfolio_after = _portfolio_return_series(close_history, positions_after)
+    portfolio_after = _portfolio_return_series(total_return_history, positions_after)
 
     sector_frame, _ = _load_component_frame(max_symbols=500)
     benchmark_close, benchmark_caps, _ = _load_close_history(
@@ -3281,8 +3415,15 @@ def analyze_virtual_trade(
         end_date=end_ts.strftime("%Y-%m-%d"),
         shared_db=shared_db,
     )
-    benchmark_daily, _, _ = _benchmark_series(
+    benchmark_total_return_close, _ = _load_total_return_history(
+        sector_frame["Symbol"].astype(str).tolist(),
         close_history=benchmark_close,
+        start_date=start_ts.strftime("%Y-%m-%d"),
+        end_date=end_ts.strftime("%Y-%m-%d"),
+        shared_db=shared_db,
+    )
+    benchmark_daily, _, _ = _benchmark_series(
+        close_history=benchmark_total_return_close,
         market_caps=benchmark_caps,
         sector_frame=sector_frame,
     )
@@ -3319,7 +3460,7 @@ def analyze_virtual_trade(
     before_risk = before.risk_summary.copy()
     after_risk, _, _ = _build_risk_summary(
         positions_after,
-        _holding_returns(close_history),
+        _holding_returns(total_return_history),
         portfolio_after,
         benchmark_daily,
     )

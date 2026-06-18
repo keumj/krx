@@ -12,6 +12,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from pipeline_krx.refresh_prices import _load_current_listing_from_fdr, _load_latest_naver_dividend_metrics, _normalize_symbol
+from pipeline_krx.db import sync_krx_total_return_indices
 
 
 def _parse_args() -> argparse.Namespace:
@@ -105,6 +106,7 @@ def main() -> int:
         f"symbols={len(metrics)}",
         f"changed_snapshot_rows={changed_snapshot_rows}",
         f"changed_price_rows={changed_price_rows}",
+        f"total_return_rows={sync_krx_total_return_indices(db_path=db_path, symbols=list(metrics.keys()))}",
         f"as_of_date={as_of_date}",
         f"db_path={db_path}",
     )

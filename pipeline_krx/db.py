@@ -193,6 +193,75 @@ def _repair_price_derived_fields_from_known_values(
     return int(conn.total_changes - before)
 
 
+def _sync_total_return_index_from_prices(
+    conn: sqlite3.Connection,
+    *,
+    symbols: list[str] | tuple[str, ...] | set[str] | None = None,
+) -> int:
+    normalized = sorted({_normalize_symbol(symbol) for symbol in (symbols or []) if _normalize_symbol(symbol)})
+    params: list[object] = []
+    symbol_filter = ""
+    if normalized:
+        placeholders = ",".join("?" for _ in normalized)
+        symbol_filter = f"WHERE symbol IN ({placeholders})"
+        params = normalized
+    rows = conn.execute(
+        f"""
+        SELECT symbol, date, close, dividend_yield
+        FROM prices
+        {symbol_filter}
+        ORDER BY symbol, date
+        """,
+        params,
+    ).fetchall()
+    if not rows:
+        return 0
+
+    updates: list[tuple[float, str, str, str]] = []
+    current_symbol = ""
+    previous_close: float | None = None
+    previous_yield: float | None = None
+    index_value = 100.0
+    basis = "total_return_proxy: close.pct_change + ffill(dividend_yield)/252"
+    for symbol, date_text, close_raw, dividend_yield_raw in rows:
+        symbol_text = _normalize_symbol(symbol)
+        if symbol_text != current_symbol:
+            current_symbol = symbol_text
+            previous_close = None
+            previous_yield = None
+            index_value = 100.0
+
+        close_value = _normalize_number(close_raw)
+        yield_value = _normalize_number(dividend_yield_raw)
+        if yield_value is not None:
+            previous_yield = max(min(float(yield_value), 100.0), 0.0)
+
+        if close_value is None or close_value <= 0:
+            updates.append((index_value, basis, symbol_text, str(date_text)))
+            continue
+
+        if previous_close is not None and previous_close > 0:
+            price_return = float(close_value) / float(previous_close) - 1.0
+            income_return = ((previous_yield or 0.0) / 100.0) / 252.0
+            index_value *= max(1.0 + price_return + income_return, 0.000001)
+
+        updates.append((index_value, basis, symbol_text, str(date_text)))
+        previous_close = float(close_value)
+
+    before = conn.total_changes
+    conn.executemany(
+        """
+        UPDATE prices
+        SET total_return_index = ?,
+            total_return_basis = ?
+        WHERE symbol = ?
+          AND date = ?
+        """,
+        updates,
+    )
+    return int(conn.total_changes - before)
+
+
 def _resolve_shared_root(shared_db_root: Path | str | None = None) -> Path:
     if shared_db_root is None:
         explicit_root = str(os.getenv("KEUMJ_KRX_DB_DIR", "")).strip()
@@ -264,6 +333,8 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             dividends REAL NOT NULL DEFAULT 0,
             dividend_yield REAL,
             stock_splits REAL NOT NULL DEFAULT 0,
+            total_return_index REAL,
+            total_return_basis TEXT,
             currency TEXT NOT NULL DEFAULT 'KRW',
             source TEXT NOT NULL DEFAULT 'unknown',
             PRIMARY KEY (symbol, date)
@@ -398,6 +469,10 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     existing_price_cols = {row[1] for row in conn.execute("PRAGMA table_info(prices)")}
     if "dividend_yield" not in existing_price_cols:
         conn.execute("ALTER TABLE prices ADD COLUMN dividend_yield REAL")
+    if "total_return_index" not in existing_price_cols:
+        conn.execute("ALTER TABLE prices ADD COLUMN total_return_index REAL")
+    if "total_return_basis" not in existing_price_cols:
+        conn.execute("ALTER TABLE prices ADD COLUMN total_return_basis TEXT")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_fund_snapshot_as_of_date ON fundamentals_snapshot(as_of_date)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_fund_quarterly_symbol_date ON fundamentals_quarterly(symbol, fiscal_date)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_fund_quarterly_fiscal_date ON fundamentals_quarterly(fiscal_date)")
@@ -776,9 +851,26 @@ def upsert_krx_prices(
         stored = int(conn.total_changes - before)
         touched_symbols = [str(row[0]) for row in rows]
         _repair_price_derived_fields_from_known_values(conn, symbols=touched_symbols)
+        _sync_total_return_index_from_prices(conn, symbols=touched_symbols)
         _sync_quarterly_shares_and_eps_from_prices(conn, symbols=touched_symbols)
         conn.commit()
         return stored
+
+
+def sync_krx_total_return_indices(
+    *,
+    db_path: Path | str | None = None,
+    shared_db_root: Path | str | None = None,
+    symbols: list[str] | tuple[str, ...] | set[str] | None = None,
+) -> int:
+    target = Path(db_path) if db_path is not None else krx_prices_sqlite_path(shared_db_root)
+    if not target.exists():
+        return 0
+    with _connect(target) as conn:
+        _ensure_schema(conn)
+        changed = _sync_total_return_index_from_prices(conn, symbols=symbols)
+        conn.commit()
+        return changed
 
 
 def upsert_krx_fundamentals_snapshot(
