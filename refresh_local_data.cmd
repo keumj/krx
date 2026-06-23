@@ -5,6 +5,9 @@ cd /d "%~dp0"
 
 set "EXIT_CODE=0"
 set "REFRESH_OK=0"
+set "INTERACTIVE=1"
+
+if not "%~1"=="" set "INTERACTIVE=0"
 
 if exist ".venv\Scripts\python.exe" (
   set "PYTHON_EXE=%CD%\.venv\Scripts\python.exe"
@@ -33,6 +36,12 @@ if "%NAVER_NEWS_CLIENT_SECRET%"=="" (
   for /f "tokens=2,*" %%A in ('reg query HKCU\Environment /v NAVER_CLIENT_SECRET 2^>nul') do set "NAVER_NEWS_CLIENT_SECRET=%%B"
 )
 
+:menu
+set "EXIT_CODE=0"
+set "REFRESH_OK=0"
+set "CHOICE="
+
+cls
 echo.
 echo ============================================================
 echo  Keumj local data refresh
@@ -72,6 +81,11 @@ if /i "%CHOICE%"=="without-fundamentals" goto :all_without_fundamentals
 if /i "%CHOICE%"=="with-fundamentals" goto :all_with_fundamentals
 
 echo Invalid option.
+if "%INTERACTIVE%"=="1" (
+  pause
+  goto :menu
+)
+set "EXIT_CODE=1"
 goto :done
 
 :stock
@@ -240,6 +254,11 @@ if "%REFRESH_OK%"=="1" (
   echo  Refresh result: FAILED ^(exit_code=%EXIT_CODE%^)
 )
 echo.
+
+if "%INTERACTIVE%"=="1" (
+  pause
+  goto :menu
+)
 
 :done
 endlocal & exit /b %EXIT_CODE%
