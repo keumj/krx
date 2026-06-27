@@ -134,13 +134,27 @@ def _migrate_recommended_start_dates(state: StockState) -> None:
         )
 
 
-def _clear_persisted_forecast_sample(state: StockState) -> bool:
-    if state.forecast_form.get("use_sample", "") != "on":
-        return False
-    state.forecast_form["use_sample"] = ""
-    state.forecast_ctx = None
-    state.forecast_error = None
-    return True
+def _clear_persisted_transient_price_inputs(state: StockState) -> bool:
+    changed = False
+    if state.forecast_form.get("use_sample", "") == "on" or state.forecast_form.get("prices_csv_path", "").strip():
+        state.forecast_form["use_sample"] = ""
+        state.forecast_form["prices_csv_path"] = ""
+        state.forecast_ctx = None
+        state.forecast_error = None
+        changed = True
+    if state.technical_form.get("use_sample", "") == "on":
+        state.technical_form["use_sample"] = ""
+        state.technical_ctx = None
+        state.technical_error = None
+        state.technical_cache = None
+        changed = True
+    if state.wfv_form.get("use_sample", "") == "on" or state.wfv_form.get("prices_csv_path", "").strip():
+        state.wfv_form["use_sample"] = ""
+        state.wfv_form["prices_csv_path"] = ""
+        state.wfv_ctx = None
+        state.wfv_error = None
+        changed = True
+    return changed
 
 
 _states: dict[str, StockState] = {}
@@ -148,7 +162,7 @@ _global_state = load_pickle("stock_last_state.pkl", StockState())
 if not isinstance(_global_state, StockState):
     _global_state = StockState()
 _migrate_recommended_start_dates(_global_state)
-if _clear_persisted_forecast_sample(_global_state):
+if _clear_persisted_transient_price_inputs(_global_state):
     save_pickle("stock_last_state.pkl", _global_state)
 _states_lock = threading.RLock()
 
@@ -201,7 +215,7 @@ def _remember_state(state: StockState) -> None:
     global _global_state
     with _states_lock:
         _global_state = _copy_state(state)
-        _clear_persisted_forecast_sample(_global_state)
+        _clear_persisted_transient_price_inputs(_global_state)
         save_pickle("stock_last_state.pkl", _global_state)
 
 

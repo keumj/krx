@@ -352,6 +352,24 @@ def _hero(dashboard: MacroDashboard, description: str) -> str:
         <div><span>주식 의견</span><strong>{html.escape(dashboard.equity_bias)}</strong></div>
       </div>
     </div>
+    {_data_quality_warning(dashboard)}
+    """
+
+
+def _data_quality_warning(dashboard: MacroDashboard) -> str:
+    sources = dashboard.sources
+    if sources is None or sources.empty or "출처" not in sources.columns:
+        return ""
+    source_text = sources["출처"].astype(str)
+    affected = sources[source_text.str.contains(r"fallback|synthetic|sample", case=False, regex=True, na=False)]
+    if affected.empty:
+        return ""
+    return f"""
+    <section class="service-card">
+      <h2>데이터 품질 경고</h2>
+      <p class="service-error">실제 원천 데이터를 불러오지 못해 합성 fallback 데이터가 포함되었습니다. 아래 지표를 실제 관측값으로 해석하거나 투자 판단에 사용하지 마세요.</p>
+      {_table(affected, table_class="macro-wide-table")}
+    </section>
     """
 
 

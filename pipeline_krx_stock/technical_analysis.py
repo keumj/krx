@@ -1125,7 +1125,7 @@ def _run_analysis(
     if not ticker and not use_sample:
         raise ValueError("Provide ticker or enable 'Use sample prices (offline)'.")
 
-    ticker_final = ticker or "SAMPLE"
+    ticker_final = "SAMPLE" if use_sample else ticker
 
     key = (ticker_final, use_sample)
 

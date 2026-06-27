@@ -2363,7 +2363,7 @@ def _run_once(form: dict[str, str]) -> _RunContext:
     if prices_csv_path:
         local_prices = load_price_data_csv(prices_csv_path)
         result = run_ticker_stock_forecast_pipeline(
-            ticker=ticker or "LOCAL",
+            ticker="LOCAL",
             horizon_days=horizon,
             history_years=history_years,
             output_dir=out_dir,
@@ -2420,7 +2420,7 @@ def _load_walk_forward_close_series(
     if prices_csv_path:
         local_prices = load_price_data_csv(prices_csv_path)
         close = _normalize_close_prices(local_prices)
-        return ticker or "LOCAL", close, "local_csv", "local_prices_csv"
+        return "LOCAL", close, "local_csv", "local_prices_csv"
 
     if use_sample:
         close = _normalize_close_prices(_sample_prices())
