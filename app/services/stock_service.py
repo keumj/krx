@@ -134,11 +134,22 @@ def _migrate_recommended_start_dates(state: StockState) -> None:
         )
 
 
+def _clear_persisted_forecast_sample(state: StockState) -> bool:
+    if state.forecast_form.get("use_sample", "") != "on":
+        return False
+    state.forecast_form["use_sample"] = ""
+    state.forecast_ctx = None
+    state.forecast_error = None
+    return True
+
+
 _states: dict[str, StockState] = {}
 _global_state = load_pickle("stock_last_state.pkl", StockState())
 if not isinstance(_global_state, StockState):
     _global_state = StockState()
 _migrate_recommended_start_dates(_global_state)
+if _clear_persisted_forecast_sample(_global_state):
+    save_pickle("stock_last_state.pkl", _global_state)
 _states_lock = threading.RLock()
 
 
@@ -190,6 +201,7 @@ def _remember_state(state: StockState) -> None:
     global _global_state
     with _states_lock:
         _global_state = _copy_state(state)
+        _clear_persisted_forecast_sample(_global_state)
         save_pickle("stock_last_state.pkl", _global_state)
 
 

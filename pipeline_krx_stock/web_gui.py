@@ -2374,7 +2374,7 @@ def _run_once(form: dict[str, str]) -> _RunContext:
     elif use_sample:
         prices = _sample_prices()
         result = run_ticker_stock_forecast_pipeline(
-            ticker=ticker or "SAMPLE",
+            ticker="SAMPLE",
             horizon_days=horizon,
             history_years=history_years,
             output_dir=out_dir,
@@ -2424,7 +2424,7 @@ def _load_walk_forward_close_series(
 
     if use_sample:
         close = _normalize_close_prices(_sample_prices())
-        return ticker or "SAMPLE", close, "sample", "sample_prices"
+        return "SAMPLE", close, "sample", "sample_prices"
 
     if not ticker:
         raise ValueError("Provide ticker, or set Local Prices CSV Path Override.")
